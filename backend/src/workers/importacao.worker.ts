@@ -76,7 +76,6 @@ async function processImportacao(job: Job<ImportacaoJobData>): Promise<object> {
         '--arquivo', filePath,
         '--distribuidora', distribuidora,
         '--uf', uf,
-        '--ano', String(ano),
       ],
       {
         env: { ...process.env },
@@ -106,8 +105,6 @@ async function processImportacao(job: Job<ImportacaoJobData>): Promise<object> {
       [
         riskScript,
         '--distribuidora', distribuidora,
-        '--uf', uf,
-        '--ano', String(ano),
       ],
       {
         env: { ...process.env },
