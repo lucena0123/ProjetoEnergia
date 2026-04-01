@@ -1,0 +1,40 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model indicadores_continuidade {
+  id            Int     @id @default(autoincrement())
+  distribuidora String  @db.VarChar(100)
+  municipio     String  @db.VarChar(100)
+  uf            String  @db.Char(2)
+  ano           Int
+  mes           Int
+  dec_apurado   Float?
+  dec_limite    Float?
+  fec_apurado   Float?
+  fec_limite    Float?
+  // violacao_dec and violacao_fec are GENERATED ALWAYS columns in the DB (computed from dec/fec apurado > limite)
+  // They are not mapped here because Prisma does not support GENERATED ALWAYS AS (expression) STORED columns.
+  // Access them via raw queries using pgPool when needed.
+}
+
+model mapa_risco {
+  id               Int      @id @default(autoincrement())
+  municipio        String   @db.VarChar(100)
+  distribuidora    String   @db.VarChar(100)
+  uf               String   @db.Char(2)
+  score_risco      Float?
+  dec_medio_12m    Float?
+  ratio_dec        Float?
+  meses_violacao   Int?
+  idade_media_anos Float?
+  atualizado_em    DateTime @default(now())
+}
