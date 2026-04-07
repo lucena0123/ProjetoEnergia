@@ -454,12 +454,32 @@ def insert_dec_fec(df: pd.DataFrame, engine) -> None:
     log.info("  %d registros inseridos.", len(df))
 
 
-def run_calculate_risk(engine) -> None:
-    """Executa o SQL de scoring diretamente (sem chamar o script externo)."""
-    log.info("Calculando scores de risco...")
-    sql = """
-    DELETE FROM mapa_risco WHERE distribuidora = :dist;
+def run_calculate_risk(engine, distribuidora: Optional[str] = None) -> None:
+    """
+    Executa o SQL de scoring diretamente (sem chamar o script externo).
 
+    Se distribuidora=None, recalcula para todas as distribuidoras presentes em
+    indicadores_continuidade (útil quando dados reais da ANEEL são usados e o
+    nome do agente pode diferir de DISTRIBUIDORA).
+    """
+    log.info("Calculando scores de risco...")
+
+    # Determine which distribuidoras to process
+    if distribuidora is not None:
+        distribuidoras = [distribuidora]
+    else:
+        with engine.connect() as conn:
+            rows = conn.execute(
+                text("SELECT DISTINCT distribuidora FROM indicadores_continuidade")
+            ).fetchall()
+        distribuidoras = [r[0] for r in rows if r[0]]
+        if not distribuidoras:
+            log.warning("  Nenhuma distribuidora encontrada em indicadores_continuidade.")
+            return
+        log.info("  Calculando scores para %d distribuidora(s): %s", len(distribuidoras), distribuidoras)
+
+    sql_delete = "DELETE FROM mapa_risco WHERE distribuidora = :dist"
+    sql_insert = """
     INSERT INTO mapa_risco
       (municipio, distribuidora, uf, score_risco, dec_medio_12m,
        ratio_dec, meses_violacao, idade_media_anos, atualizado_em)
@@ -507,32 +527,33 @@ def run_calculate_risk(engine) -> None:
       ROUND(idade_media_anos::numeric, 1),
       NOW()
     FROM scoring
-    ORDER BY (score_dec + score_freq + score_idade) DESC;
+    ORDER BY (score_dec + score_freq + score_idade) DESC
     """
-    with engine.begin() as conn:
-        for statement in sql.strip().split(";"):
-            stmt = statement.strip()
-            if stmt:
-                conn.execute(text(stmt), {"dist": DISTRIBUIDORA})
+
+    for dist in distribuidoras:
+        with engine.begin() as conn:
+            conn.execute(text(sql_delete), {"dist": dist})
+            conn.execute(text(sql_insert), {"dist": dist})
 
     with engine.connect() as conn:
         total = conn.execute(
-            text("SELECT COUNT(*) FROM mapa_risco WHERE distribuidora = :d"),
-            {"d": DISTRIBUIDORA},
+            text("SELECT COUNT(*) FROM mapa_risco WHERE distribuidora = ANY(:dists)"),
+            {"dists": distribuidoras},
         ).scalar()
         top5 = conn.execute(
             text("""
-                SELECT municipio, score_risco
-                FROM mapa_risco WHERE distribuidora = :d
+                SELECT municipio, distribuidora, score_risco
+                FROM mapa_risco WHERE distribuidora = ANY(:dists)
                 ORDER BY score_risco DESC LIMIT 5
             """),
-            {"d": DISTRIBUIDORA},
+            {"dists": distribuidoras},
         ).fetchall()
 
     log.info("  %d municípios com score calculado.", total)
     log.info("  Top 5 municípios críticos:")
-    for i, (mun, score) in enumerate(top5, 1):
-        log.info("    %d. %-30s  score %.1f", i, mun, score)
+    for i, row in enumerate(top5, 1):
+        mun, dist, score = row[0], row[1], row[2]
+        log.info("    %d. %-30s (%s)  score %.1f", i, mun, dist, score)
 
 
 # ---------------------------------------------------------------------------
@@ -592,13 +613,23 @@ def main(uf: str, limpar: bool, db_url: Optional[str]) -> None:
     insert_transformadores(trans_gdf, engine)
 
     # ── 4. DEC/FEC ────────────────────────────────────────────────────────────
-    log.info("[4/9] Gerando indicadores DEC/FEC...")
-    dec_df = generate_dec_fec(municipios_gdf, profiles)
-    insert_dec_fec(dec_df, engine)
+    log.info("[4/9] Carregando indicadores DEC/FEC reais da ANEEL (CE/AL)...")
+    aneel_ok = False
+    try:
+        from ingest_aneel_continuidade import ingest_for_seed as _aneel_ingest
+        _aneel_ingest(uf, engine)
+        log.info("  Usando dados reais ANEEL para DEC/FEC")
+        aneel_ok = True
+    except Exception as exc:
+        log.warning("  Fallback: usando dados sintéticos (motivo: %s)", exc)
+
+    if not aneel_ok:
+        dec_df = generate_dec_fec(municipios_gdf, profiles)
+        insert_dec_fec(dec_df, engine)
 
     # ── 5. Score de risco ─────────────────────────────────────────────────────
     log.info("[5/9] Calculando scores de risco...")
-    run_calculate_risk(engine)
+    run_calculate_risk(engine, distribuidora=None)
 
     # ── 6. Religadores + Chaves ───────────────────────────────────────────────
     log.info("[6/9] Gerando religadores e chaves sintéticos...")
