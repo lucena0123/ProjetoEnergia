@@ -1,4 +1,4 @@
-.PHONY: help setup up down logs seed-demo ingest-ibge download-bdgd download-dec download-indqual ingest-bdgd ingest-dec score pipeline-shell dev-backend dev-frontend
+.PHONY: help setup up down logs seed-demo ingest-ibge download-bdgd download-dec download-indqual ingest-bdgd ingest-dec ingest-aneel score pipeline-shell dev-backend dev-frontend gaps historico populacao full-pipeline
 
 # ── Variáveis ─────────────────────────────────────────────────────────────────
 COMPOSE     = docker compose
@@ -6,6 +6,7 @@ PIPELINE    = $(COMPOSE) exec pipeline python
 DISTRIBUIDORA ?= ""
 UF          ?= ""
 ARQUIVO     ?= ""
+,           := ,
 
 # ── Help ──────────────────────────────────────────────────────────────────────
 help:
@@ -21,7 +22,7 @@ help:
 	@echo "  make ingest-bdgd ARQUIVO=/data/bdgd.gdb.zip DISTRIBUIDORA='Enel Ceará' UF=CE"
 	@echo "                        Ingere um arquivo BDGD (.gpkg, .gdb ou .gdb.zip) no banco"
 	@echo "  make ingest-dec ARQUIVO=/data/dec_fec.csv"
-	@echo "                        Ingere arquivo DEC/FEC da ANEEL"
+	@echo "                        Ingere arquivo DEC/FEC da ANEEL (CSV local)"
 	@echo "  make download-bdgd QUERY=ENEL_CE ANO=2024 SAIDA=/data/enel_ce_2024.gdb.zip"
 	@echo "                        Baixa a BDGD oficial no formato .gdb.zip"
 	@echo "  make download-dec SAIDA=/data/indicadores_continuidade.csv"
@@ -32,11 +33,18 @@ help:
 	@echo "                        Baixa o vínculo oficial IndQual → município"
 	@echo "  make ingest-dec ARQUIVO=/data/indicadores_continuidade.csv ARQUIVO_LIMITE=/data/indicadores_continuidade_limite.csv ARQUIVO_INDQUAL=/data/indqual_municipio.csv UF=CE DISTRIBUIDORA='Enel Ceará' LIMPAR=1"
 	@echo "                        Ingere continuidade oficial ANEEL agregada por município"
+	@echo "  make ingest-aneel UF=AL"
+	@echo "                        Baixa DEC/FEC reais da ANEEL para um estado (com cache)"
+	@echo "  make ingest-aneel UF=AL,CE"
+	@echo "                        Baixa DEC/FEC reais da ANEEL para múltiplos estados"
+	@echo "  make ingest-aneel UF=ALL"
+	@echo "                        Baixa DEC/FEC reais da ANEEL para todos os estados"
 	@echo "  make score            Recalcula scores de risco para todos os municípios"
 	@echo "  make score DISTRIBUIDORA='Equatorial AL'"
 	@echo "                        Recalcula scores de uma distribuidora específica"
 	@echo ""
 	@echo "  make seed-demo            Popula banco com dados de demo (AL) — ~3 min"
+	@echo "                            Tenta baixar DEC/FEC reais da ANEEL; usa sintéticos em caso de falha"
 	@echo "  make seed-demo UF=PE      Gera demo para outro estado"
 	@echo ""
 	@echo "  make ingest-ibge UF=AL"
@@ -130,6 +138,10 @@ ingest-dec:
 		$(if $(UF),--uf $(UF),) \
 		$(if $(DISTRIBUIDORA),--distribuidora "$(DISTRIBUIDORA)",) \
 		$(if $(LIMPAR),--limpar,)
+
+ingest-aneel:
+	@if [ -z "$(UF)" ]; then echo "Erro: informe UF=AL ou UF=CE ou UF=ALL"; exit 1; fi
+	$(PIPELINE) ingest_aneel_continuidade.py $(foreach u,$(subst $($,), ,$(UF)),--uf $(u))
 
 score:
 ifdef DISTRIBUIDORA
