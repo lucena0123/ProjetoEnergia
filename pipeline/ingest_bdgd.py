@@ -2,12 +2,17 @@
 """
 ingest_bdgd.py — GridRisk pipeline step 1
 
-Ingests layers from a BDGD GeoPackage file (.gpkg) into the PostgreSQL/PostGIS
-database, normalising column names and reprojecting to EPSG:4674 (SIRGAS 2000).
+Ingests layers from official ANEEL BDGD datasets into PostgreSQL/PostGIS,
+normalising column names and reprojecting to EPSG:4674 (SIRGAS 2000).
+
+Supported input formats:
+  - GeoPackage (.gpkg)
+  - File Geodatabase directory (.gdb)
+  - Zipped File Geodatabase (.gdb.zip / .zip containing a .gdb directory)
 
 Usage:
     python ingest_bdgd.py \
-        --arquivo /path/to/bdgd.gpkg \
+        --arquivo /path/to/bdgd.gdb.zip \
         --distribuidora "CEMIG-D" \
         --uf MG \
         [--db-url postgresql://user:pass@host/db]
@@ -16,7 +21,11 @@ Usage:
 import os
 import sys
 import logging
+import tempfile
+import zipfile
+from contextlib import contextmanager
 from datetime import datetime
+from pathlib import Path
 
 import click
 import geopandas as gpd
@@ -124,22 +133,80 @@ def _ts() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
-def _list_layers(arquivo: str) -> list[str]:
-    """Return all layer names present in the GeoPackage."""
+def _find_extracted_dataset(root: Path) -> Path | None:
+    """Return the first supported spatial dataset found inside an extracted archive."""
+    gdb_dirs = sorted(p for p in root.rglob("*.gdb") if p.is_dir())
+    if gdb_dirs:
+        return gdb_dirs[0]
+
+    gpkg_files = sorted(p for p in root.rglob("*.gpkg") if p.is_file())
+    if gpkg_files:
+        return gpkg_files[0]
+
+    return None
+
+
+@contextmanager
+def _prepare_dataset(arquivo: str):
+    """
+    Resolve the source dataset into a path readable by Fiona/GeoPandas.
+
+    The official ANEEL BDGD download is a zipped File Geodatabase, so this
+    helper transparently extracts `.zip` archives into a temporary directory.
+    """
+    source = Path(arquivo)
+    suffixes = [suffix.lower() for suffix in source.suffixes]
+
+    if source.is_dir():
+        if source.suffix.lower() != ".gdb":
+            raise RuntimeError(
+                f"Unsupported directory input '{arquivo}'. Expected a .gdb directory."
+            )
+        yield str(source)
+        return
+
+    if source.suffix.lower() == ".gpkg":
+        yield str(source)
+        return
+
+    if source.suffix.lower() == ".zip":
+        with tempfile.TemporaryDirectory(prefix="bdgd_extract_") as temp_dir:
+            with zipfile.ZipFile(source) as archive:
+                archive.extractall(temp_dir)
+
+            dataset = _find_extracted_dataset(Path(temp_dir))
+            if dataset is None:
+                raise RuntimeError(
+                    f"No supported BDGD dataset found inside '{arquivo}'. "
+                    "Expected a .gdb directory or .gpkg file."
+                )
+
+            log.info("Archive extracted to %s; resolved dataset: %s", temp_dir, dataset)
+            yield str(dataset)
+        return
+
+    raise RuntimeError(
+        f"Unsupported BDGD input '{arquivo}'. "
+        "Supported formats: .gpkg, .gdb, .gdb.zip"
+    )
+
+
+def _list_layers(dataset_path: str) -> list[str]:
+    """Return all layer names present in the source dataset."""
     import fiona  # fiona is a geopandas dependency
 
     try:
-        return fiona.listlayers(arquivo)
+        return fiona.listlayers(dataset_path)
     except Exception as exc:  # noqa: BLE001
-        log.error("Could not list layers in %s: %s", arquivo, exc)
+        log.error("Could not list layers in %s: %s", dataset_path, exc)
         return []
 
 
-def _read_layer(arquivo: str, layer: str) -> gpd.GeoDataFrame | None:
-    """Read a single layer from the GeoPackage. Returns None on failure."""
+def _read_layer(dataset_path: str, layer: str) -> gpd.GeoDataFrame | None:
+    """Read a single layer from the source dataset. Returns None on failure."""
     try:
         log.info("[%s] Reading layer '%s' …", _ts(), layer)
-        gdf = gpd.read_file(arquivo, layer=layer, engine="pyogrio")
+        gdf = gpd.read_file(dataset_path, layer=layer, engine="pyogrio")
         log.info("[%s] Layer '%s' loaded: %d features", _ts(), layer, len(gdf))
         return gdf
     except Exception as exc:  # noqa: BLE001
@@ -200,7 +267,7 @@ def _normalise_columns(
 
     # Add metadata columns
     gdf["distribuidora"] = distribuidora
-    gdf["municipio"] = ""
+    gdf["municipio"] = None
     gdf["uf"] = uf
 
     # Build the final ordered column list
@@ -211,7 +278,97 @@ def _normalise_columns(
     # Keep only columns that are actually present
     final_cols = [c for c in final_cols if c in gdf.columns or c == "geometry"]
 
-    return gdf[final_cols]
+    result = gdf[final_cols]
+    if result.geometry.name != "geom":
+        result = result.rename_geometry("geom")
+    return result
+
+
+def _load_ibge_municipios(engine, uf: str) -> gpd.GeoDataFrame:
+    """Load municipality boundaries for the target UF from PostGIS."""
+    municipios = gpd.read_postgis(
+        "SELECT codigo_ibge, nome, uf, geom FROM ibge_municipios WHERE uf = %(uf)s",
+        engine,
+        params={"uf": uf},
+        geom_col="geom",
+    )
+    if municipios.empty:
+        raise RuntimeError(
+            f"No IBGE municipality boundaries found for UF={uf}. "
+            "Run ingest_ibge_municipios.py first."
+        )
+
+    if municipios.crs is None:
+        municipios = municipios.set_crs(TARGET_CRS)
+    elif municipios.crs.to_string() != TARGET_CRS:
+        municipios = municipios.to_crs(TARGET_CRS)
+
+    if municipios.geometry.name != "geometry":
+        municipios = municipios.rename_geometry("geometry")
+
+    return municipios[["codigo_ibge", "nome", "uf", "geometry"]]
+
+
+def _assign_municipios(
+    gdf: gpd.GeoDataFrame,
+    municipios_gdf: gpd.GeoDataFrame,
+    layer: str,
+) -> gpd.GeoDataFrame:
+    """
+    Assign each BDGD feature to a municipality using a representative point.
+
+    Using representative points avoids duplicating line features that cross
+    municipal boundaries while still keeping a deterministic municipality key.
+    """
+    if gdf.empty:
+        return gdf
+
+    if gdf.crs is None:
+        raise RuntimeError(f"Layer '{layer}' has no CRS; cannot spatially assign municipalities.")
+
+    working = gdf.copy()
+    row_id_col = "__row_id"
+    working[row_id_col] = working.index
+
+    rep_points_metric = gpd.GeoDataFrame(
+        working[[row_id_col]].copy(),
+        geometry=working.to_crs(3857).geometry.representative_point(),
+        crs="EPSG:3857",
+    ).to_crs(TARGET_CRS)
+
+    joined = gpd.sjoin(
+        rep_points_metric,
+        municipios_gdf,
+        how="left",
+        predicate="intersects",
+    )
+
+    if joined.index.has_duplicates:
+        joined = joined[~joined.index.duplicated(keep="first")]
+
+    working["municipio"] = joined["nome"].reindex(working.index)
+
+    unmatched_mask = working["municipio"].isna() | (working["municipio"].astype(str).str.strip() == "")
+    unmatched = int(unmatched_mask.sum())
+    matched = len(working) - unmatched
+
+    log.info(
+        "[%s] Layer '%s': %d/%d features linked to IBGE municipalities.",
+        _ts(),
+        layer,
+        matched,
+        len(working),
+    )
+    if unmatched:
+        sample_ids = working.loc[unmatched_mask, "cod_id"].dropna().astype(str).head(5).tolist()
+        log.warning(
+            "Layer '%s': %d features could not be linked to a municipality. Sample cod_id: %s",
+            layer,
+            unmatched,
+            sample_ids if sample_ids else "n/a",
+        )
+
+    return working.drop(columns=[row_id_col])
 
 
 def _write_layer(
@@ -249,7 +406,7 @@ def _write_layer(
     "--arquivo",
     required=True,
     type=click.Path(exists=True, readable=True),
-    help="Path to the BDGD GeoPackage (.gpkg) file.",
+    help="Path to the BDGD dataset (.gpkg, .gdb, or .gdb.zip).",
 )
 @click.option(
     "--distribuidora",
@@ -273,7 +430,7 @@ def _write_layer(
     help="SQLAlchemy database URL.  Falls back to DATABASE_URL env variable.",
 )
 def main(arquivo: str, distribuidora: str, uf: str, db_url: str | None) -> None:
-    """Ingest BDGD layers from a GeoPackage into the GridRisk PostGIS database."""
+    """Ingest BDGD layers into the GridRisk PostGIS database."""
 
     # Load .env for DATABASE_URL if not explicitly provided
     load_dotenv()
@@ -307,57 +464,73 @@ def main(arquivo: str, distribuidora: str, uf: str, db_url: str | None) -> None:
         log.error("Cannot connect to database: %s", exc)
         sys.exit(1)
 
-    # List layers in the file
-    available_layers = _list_layers(arquivo)
-    if not available_layers:
-        log.error("No layers found in '%s'.  Aborting.", arquivo)
+    try:
+        municipios_gdf = _load_ibge_municipios(engine, uf)
+        log.info("Loaded %d IBGE municipality polygons for UF=%s.", len(municipios_gdf), uf)
+    except Exception as exc:  # noqa: BLE001
+        log.error("Cannot load IBGE municipalities for UF=%s: %s", uf, exc)
         sys.exit(1)
-
-    log.info("Layers found in file: %s", available_layers)
 
     totals: dict[str, int] = {}
 
-    for bdgd_layer, (table, col_map) in LAYER_MAP.items():
-        if bdgd_layer not in available_layers:
-            log.warning("Layer '%s' not present in file — skipping.", bdgd_layer)
-            continue
+    try:
+        with _prepare_dataset(arquivo) as dataset_path:
+            log.info("Resolved BDGD dataset: %s", dataset_path)
 
-        log.info("--- Processing layer '%s' → table '%s' ---", bdgd_layer, table)
+            available_layers = _list_layers(dataset_path)
+            if not available_layers:
+                log.error("No layers found in '%s'.  Aborting.", dataset_path)
+                sys.exit(1)
 
-        try:
-            # 1. Read
-            gdf = _read_layer(arquivo, bdgd_layer)
-            if gdf is None or gdf.empty:
-                log.warning("Layer '%s' is empty — skipping.", bdgd_layer)
-                continue
+            log.info("Layers found in dataset: %s", available_layers)
 
-            raw_count = len(gdf)
+            for bdgd_layer, (table, col_map) in LAYER_MAP.items():
+                if bdgd_layer not in available_layers:
+                    log.warning("Layer '%s' not present in dataset — skipping.", bdgd_layer)
+                    continue
 
-            # 2. Reproject
-            gdf = _reproject(gdf, bdgd_layer)
+                log.info("--- Processing layer '%s' → table '%s' ---", bdgd_layer, table)
 
-            # 3. Normalise columns
-            gdf = _normalise_columns(gdf, col_map, distribuidora, uf)
+                try:
+                    # 1. Read
+                    gdf = _read_layer(dataset_path, bdgd_layer)
+                    if gdf is None or gdf.empty:
+                        log.warning("Layer '%s' is empty — skipping.", bdgd_layer)
+                        continue
 
-            log.info(
-                "[%s] Layer '%s': %d features ready for import.",
-                _ts(),
-                bdgd_layer,
-                raw_count,
-            )
+                    raw_count = len(gdf)
 
-            # 4. Write to PostGIS
-            inserted = _write_layer(gdf, table, engine, bdgd_layer)
-            totals[bdgd_layer] = inserted
+                    # 2. Reproject
+                    gdf = _reproject(gdf, bdgd_layer)
 
-        except Exception as exc:  # noqa: BLE001
-            log.error(
-                "Unhandled error processing layer '%s': %s — layer skipped.",
-                bdgd_layer,
-                exc,
-                exc_info=True,
-            )
-            totals[bdgd_layer] = -1  # -1 signals failure
+                    # 3. Normalise columns
+                    gdf = _normalise_columns(gdf, col_map, distribuidora, uf)
+
+                    # 4. Enrich municipality using IBGE boundaries
+                    gdf = _assign_municipios(gdf, municipios_gdf, bdgd_layer)
+
+                    log.info(
+                        "[%s] Layer '%s': %d features ready for import.",
+                        _ts(),
+                        bdgd_layer,
+                        raw_count,
+                    )
+
+                    # 5. Write to PostGIS
+                    inserted = _write_layer(gdf, table, engine, bdgd_layer)
+                    totals[bdgd_layer] = inserted
+
+                except Exception as exc:  # noqa: BLE001
+                    log.error(
+                        "Unhandled error processing layer '%s': %s — layer skipped.",
+                        bdgd_layer,
+                        exc,
+                        exc_info=True,
+                    )
+                    totals[bdgd_layer] = -1  # -1 signals failure
+    except Exception as exc:  # noqa: BLE001
+        log.error("Cannot prepare BDGD dataset from '%s': %s", arquivo, exc)
+        sys.exit(1)
 
     # Summary
     log.info("=== Ingest summary ===")

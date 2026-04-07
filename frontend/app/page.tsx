@@ -175,9 +175,9 @@ export default function HomePage() {
               {/* Row 2: 3 cards */}
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                 <KpiCard
-                  title="Consumidores em Risco"
+                  title="Consumidores em Risco (Estim.)"
                   value={kpisLoading ? '—' : formatLargeNumber(kpis?.consumidores_afetados ?? null)}
-                  subtitle="Estimativa em municípios críticos"
+                  subtitle="Proxy populacional em municípios críticos"
                   color="red"
                 />
                 <KpiCard

@@ -41,18 +41,26 @@ interface SocialRow {
 interface HistoricoRow {
   ano: number
   mes: number
-  score_risco: number
-  dec_medio: number | null
+  score_risco: number | string
+  dec_medio: number | string | null
+}
+
+interface QualidadeRow {
+  infraestrutura_sintetica: boolean
+}
+
+interface LimiteRow {
+  dec_limite: string | null
 }
 
 interface TransformadorAgingRow {
   cod_id: string | null
-  potencia_nom: number | null
+  potencia_nom: number | string | null
   fabricante: string | null
-  idade_anos: number | null
-  vida_util_restante_anos: number | null
+  idade_anos: number | string | null
+  vida_util_restante_anos: number | string | null
   status: string
-  score_equipamento: number | null
+  score_equipamento: number | string | null
   geometry: object | null
 }
 
@@ -118,6 +126,12 @@ function calcTendencia(mediaRecente: number | null, mediaAnterior: number | null
   if (mediaRecente > mediaAnterior + 2) return 'piorando'
   if (mediaRecente < mediaAnterior - 2) return 'melhorando'
   return 'estavel'
+}
+
+function toNullableNumber(value: number | string | null | undefined): number | null {
+  if (value == null) return null
+  const parsed = typeof value === 'number' ? value : parseFloat(value)
+  return Number.isFinite(parsed) ? parsed : null
 }
 
 // ---------------------------------------------------------------------------
@@ -224,34 +238,108 @@ export const municipioRoutes: FastifyPluginAsync = async (fastify: FastifyInstan
       const socialResult = await pgPool.query<SocialRow>(socialSql, [municipio, risco.uf])
       const social = socialResult.rows[0] ?? null
 
-      // 5. Historical scores (last 12 months)
+      // 5. Continuity limit based on the last available 12 months
+      const limiteSql = `
+        SELECT ROUND(AVG(dec_limite)::numeric, 1) AS dec_limite
+        FROM indicadores_continuidade
+        WHERE municipio = $1
+          AND distribuidora = $2
+          AND (ano * 12 + mes) >= (
+            SELECT MAX(ano * 12 + mes) - 11
+            FROM indicadores_continuidade
+            WHERE municipio = $1 AND distribuidora = $2
+          )
+      `
+      const limiteResult = await pgPool.query<LimiteRow>(limiteSql, [municipio, dist])
+      const decLimite = parseFloat(limiteResult.rows[0]?.dec_limite ?? '12') || 12
+
+      // 6. Historical scores (rolling monthly score based on real DEC/FEC series)
       const historSql = `
-        SELECT ano, mes, score_risco, dec_medio
-        FROM historico_score
-        WHERE municipio = $1 AND distribuidora = $2
-        ORDER BY ano DESC, mes DESC
+        WITH monthly AS (
+          SELECT
+            ano,
+            mes,
+            dec_apurado,
+            dec_limite,
+            CASE WHEN violacao_dec THEN 1 ELSE 0 END AS violacao_dec
+          FROM indicadores_continuidade
+          WHERE municipio = $1 AND distribuidora = $2
+        ),
+        rolling AS (
+          SELECT
+            ano,
+            mes,
+            COUNT(*) OVER w AS pontos_janela,
+            AVG(dec_apurado) OVER w AS dec_medio_12m,
+            AVG(dec_limite) OVER w AS dec_limite_12m,
+            SUM(violacao_dec) OVER w AS meses_violacao_12m
+          FROM monthly
+          WINDOW w AS (ORDER BY ano, mes ROWS BETWEEN 11 PRECEDING AND CURRENT ROW)
+        ),
+        idade_rede AS (
+          SELECT COALESCE(AVG(EXTRACT(YEAR FROM AGE(NOW(), data_implant))), 20) AS idade_media_anos
+          FROM rede_mt
+          WHERE municipio = $1 AND distribuidora = $2 AND data_implant IS NOT NULL
+        )
+        SELECT
+          r.ano,
+          r.mes,
+          ROUND((
+            LEAST(
+              CASE
+                WHEN COALESCE(r.dec_limite_12m, 0) > 0
+                THEN LEAST(r.dec_medio_12m / r.dec_limite_12m, 3.0) / 3.0
+                ELSE 0
+              END,
+              1.0
+            ) * 40
+            + LEAST(COALESCE(r.meses_violacao_12m, 0)::float / 12.0, 1.0) * 30
+            + LEAST(COALESCE(ir.idade_media_anos, 20) / 40.0, 1.0) * 30
+          )::numeric, 2) AS score_risco,
+          ROUND(r.dec_medio_12m::numeric, 2) AS dec_medio
+        FROM rolling r
+        CROSS JOIN idade_rede ir
+        WHERE r.pontos_janela >= 3
+        ORDER BY r.ano DESC, r.mes DESC
         LIMIT 12
       `
       const historResult = await pgPool.query<HistoricoRow>(historSql, [municipio, dist])
       const historico = historResult.rows.reverse() // chronological order
 
-      // 6. Trend: compare last 3 vs previous 3 months
-      const tendenciaSql = `
-        WITH ultimos_6 AS (
-          SELECT score_risco,
-            ROW_NUMBER() OVER (ORDER BY ano DESC, mes DESC) AS rn
-          FROM historico_score
-          WHERE municipio = $1 AND distribuidora = $2
-        )
-        SELECT
-          AVG(score_risco) FILTER (WHERE rn <= 3)         AS media_recente,
-          AVG(score_risco) FILTER (WHERE rn BETWEEN 4 AND 6) AS media_anterior
-        FROM ultimos_6
+      // 7. Data quality flags
+      const qualidadeSql = `
+        SELECT (
+          EXISTS(
+            SELECT 1 FROM rede_mt
+            WHERE municipio = $1 AND distribuidora = $2 AND cod_id ILIKE '%DEMO%'
+          )
+          OR EXISTS(
+            SELECT 1 FROM transformadores
+            WHERE municipio = $1 AND distribuidora = $2 AND cod_id ILIKE '%DEMO%'
+          )
+          OR EXISTS(
+            SELECT 1 FROM religadores
+            WHERE municipio = $1 AND distribuidora = $2 AND cod_id ILIKE '%DEMO%'
+          )
+          OR EXISTS(
+            SELECT 1 FROM chaves
+            WHERE municipio = $1 AND distribuidora = $2 AND cod_id ILIKE '%DEMO%'
+          )
+        ) AS infraestrutura_sintetica
       `
-      const tendResult = await pgPool.query(tendenciaSql, [municipio, dist])
-      const tRow = tendResult.rows[0]
-      const mediaRecente = tRow?.media_recente != null ? parseFloat(tRow.media_recente) : null
-      const mediaAnterior = tRow?.media_anterior != null ? parseFloat(tRow.media_anterior) : null
+      const qualidadeResult = await pgPool.query<QualidadeRow>(qualidadeSql, [municipio, dist])
+      const qualidade = qualidadeResult.rows[0]
+
+      // 8. Trend: compare last 3 vs previous 3 months from the assembled history
+      const orderedHistory = [...historico].reverse()
+      const recent = orderedHistory.slice(0, 3)
+      const previous = orderedHistory.slice(3, 6)
+      const mediaRecente = recent.length > 0
+        ? recent.reduce((sum, item) => sum + parseFloat(String(item.score_risco)), 0) / recent.length
+        : null
+      const mediaAnterior = previous.length > 0
+        ? previous.reduce((sum, item) => sum + parseFloat(String(item.score_risco)), 0) / previous.length
+        : null
       const tendencia = calcTendencia(mediaRecente, mediaAnterior)
 
       // Compute protection coverage %
@@ -270,7 +358,7 @@ export const municipioRoutes: FastifyPluginAsync = async (fastify: FastifyInstan
         uf: risco.uf,
         score_risco: risco.score_risco,
         dec_medio_12m: risco.dec_medio_12m,
-        dec_limite: 12.0, // standard ANEEL limit
+        dec_limite: decLimite,
         ratio_dec: risco.ratio_dec,
         meses_violacao: risco.meses_violacao,
         tendencia,
@@ -294,11 +382,19 @@ export const municipioRoutes: FastifyPluginAsync = async (fastify: FastifyInstan
           densidade_hab_km2: densidade,
           pib_per_capita: social?.pib_per_capita ?? null,
         },
+        qualidade_dados: {
+          infraestrutura: qualidade?.infraestrutura_sintetica ? 'sintetica' : 'real',
+          historico_meses_disponiveis: historico.length,
+          historico_status:
+            historico.length >= 12 ? 'completo'
+            : historico.length >= 6 ? 'parcial'
+            : 'insuficiente',
+        },
         historico: historico.map((h) => ({
           ano: h.ano,
           mes: h.mes,
-          score_risco: h.score_risco,
-          dec_medio: h.dec_medio,
+          score_risco: parseFloat(String(h.score_risco)),
+          dec_medio: h.dec_medio != null ? parseFloat(String(h.dec_medio)) : null,
         })),
       })
     },
@@ -361,7 +457,15 @@ export const municipioRoutes: FastifyPluginAsync = async (fastify: FastifyInstan
       `
 
       const result = await pgPool.query<TransformadorAgingRow>(sql, params)
-      return reply.send(toFeatureCollection(result.rows))
+      const normalizedRows = result.rows.map((row) => ({
+        ...row,
+        potencia_nom: toNullableNumber(row.potencia_nom),
+        idade_anos: toNullableNumber(row.idade_anos),
+        vida_util_restante_anos: toNullableNumber(row.vida_util_restante_anos),
+        score_equipamento: toNullableNumber(row.score_equipamento),
+      }))
+
+      return reply.send(toFeatureCollection(normalizedRows))
     },
   )
 

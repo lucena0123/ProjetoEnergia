@@ -87,7 +87,7 @@ export default function PainelRisco({
               <th className="px-3 py-3 text-right">DEC Médio (h)</th>
               <th className="px-3 py-3 text-right">Meses Viol.</th>
               <th className="px-3 py-3 text-right">Idade (a)</th>
-              <th className="px-3 py-3 text-right">Pop. Afetada</th>
+              <th className="px-3 py-3 text-right">População</th>
               <th className="px-3 py-3 text-right">Km s/ Prot.</th>
             </tr>
           </thead>

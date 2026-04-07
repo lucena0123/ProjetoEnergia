@@ -36,6 +36,11 @@ interface DetalheData {
     densidade_hab_km2: number | null
     pib_per_capita: number | null
   }
+  qualidade_dados: {
+    infraestrutura: 'sintetica' | 'real'
+    historico_meses_disponiveis: number
+    historico_status: 'completo' | 'parcial' | 'insuficiente'
+  }
   historico: Array<{
     ano: number
     mes: number
@@ -48,12 +53,12 @@ interface TransformadorFeature {
   type: 'Feature'
   properties: {
     cod_id: string
-    potencia_nom: number
+    potencia_nom: number | null
     fabricante: string
-    idade_anos: number
-    vida_util_restante_anos: number
+    idade_anos: number | null
+    vida_util_restante_anos: number | null
     status: 'critico' | 'atencao' | 'ok'
-    score_equipamento: number
+    score_equipamento: number | null
   }
 }
 
@@ -76,6 +81,43 @@ function formatN(n: number | null | undefined): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
   if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`
   return n.toLocaleString('pt-BR')
+}
+
+function toNumber(value: unknown): number | null {
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? value : null
+  }
+  if (typeof value === 'string') {
+    const parsed = Number.parseFloat(value)
+    return Number.isFinite(parsed) ? parsed : null
+  }
+  return null
+}
+
+function normalizeTransformadorFeatures(features: unknown[]): TransformadorFeature[] {
+  return features.flatMap((feature) => {
+    if (!feature || typeof feature !== 'object') return []
+
+    const candidate = feature as {
+      type?: string
+      properties?: Record<string, unknown>
+    }
+
+    if (candidate.type !== 'Feature' || !candidate.properties) return []
+
+    return [{
+      type: 'Feature' as const,
+      properties: {
+        cod_id: String(candidate.properties.cod_id ?? ''),
+        potencia_nom: toNumber(candidate.properties.potencia_nom),
+        fabricante: String(candidate.properties.fabricante ?? '—'),
+        idade_anos: toNumber(candidate.properties.idade_anos),
+        vida_util_restante_anos: toNumber(candidate.properties.vida_util_restante_anos),
+        status: (candidate.properties.status as TransformadorFeature['properties']['status']) ?? 'ok',
+        score_equipamento: toNumber(candidate.properties.score_equipamento),
+      },
+    }]
+  })
 }
 
 export default function MunicipioPage({ params }: { params: { nome: string } }) {
@@ -105,7 +147,7 @@ export default function MunicipioPage({ params }: { params: { nome: string } }) 
 
         if (transRes.ok) {
           const transData = await transRes.json()
-          setTransformadores(transData.features ?? [])
+          setTransformadores(normalizeTransformadorFeatures(transData.features ?? []))
         }
       } catch (err) {
         setError('Erro ao conectar com a API.')
@@ -152,6 +194,7 @@ export default function MunicipioPage({ params }: { params: { nome: string } }) 
   const criticosTrans = transformadores
     .filter((t) => t.properties.status === 'critico')
     .slice(0, 20)
+  const historicoSuficiente = detalhe.qualidade_dados.historico_status !== 'insuficiente'
 
   return (
     <main className="min-h-screen bg-gray-950 text-white">
@@ -180,6 +223,31 @@ export default function MunicipioPage({ params }: { params: { nome: string } }) 
       </header>
 
       <div className="max-w-6xl mx-auto px-6 py-8 space-y-8">
+        {(detalhe.qualidade_dados.infraestrutura === 'sintetica'
+          || detalhe.qualidade_dados.historico_status !== 'completo') && (
+          <section className="rounded-xl border border-amber-700/60 bg-amber-950/40 px-5 py-4 text-sm text-amber-100">
+            <div className="font-semibold tracking-wide text-amber-300">
+              Confiabilidade dos dados
+            </div>
+            <div className="mt-2 space-y-1 text-amber-50/90">
+              {detalhe.qualidade_dados.infraestrutura === 'sintetica' && (
+                <p>
+                  Infraestrutura, proteção e criticidade desta página ainda usam base demonstrativa.
+                  Use estes números apenas para validação do produto.
+                </p>
+              )}
+              {detalhe.qualidade_dados.historico_status !== 'completo' && (
+                <p>
+                  Histórico disponível: {detalhe.qualidade_dados.historico_meses_disponiveis} mês(es).
+                  A tendência ainda não deve ser tratada como série histórica robusta.
+                </p>
+              )}
+              <p>
+                População e densidade vêm do IBGE. O score continua sendo uma métrica derivada do projeto.
+              </p>
+            </div>
+          </section>
+        )}
 
         {/* Hero: score + trend + sparkline */}
         <section className="bg-gray-900 border border-gray-800 rounded-xl p-6">
@@ -198,9 +266,11 @@ export default function MunicipioPage({ params }: { params: { nome: string } }) 
               </div>
             </div>
 
-            {sparkData.length > 0 && (
+            {sparkData.length > 1 && historicoSuficiente ? (
               <div className="shrink-0">
-                <p className="text-xs text-gray-500 mb-2">Histórico de Score (12 meses)</p>
+                <p className="text-xs text-gray-500 mb-2">
+                  Histórico de Score ({detalhe.qualidade_dados.historico_meses_disponiveis} meses)
+                </p>
                 <SparkLine data={sparkData} width={240} height={64} />
                 <div className="flex justify-between text-xs text-gray-600 mt-1">
                   {detalhe.historico[0] && (
@@ -213,6 +283,10 @@ export default function MunicipioPage({ params }: { params: { nome: string } }) 
                     </span>
                   )}
                 </div>
+              </div>
+            ) : (
+              <div className="shrink-0 rounded-lg border border-gray-800 bg-gray-950/60 px-4 py-3 text-xs text-gray-400">
+                Histórico insuficiente para exibir tendência com confiança.
               </div>
             )}
           </div>
@@ -244,11 +318,11 @@ export default function MunicipioPage({ params }: { params: { nome: string } }) 
             <p className="text-gray-600 text-xs mt-0.5">proteção de rede</p>
           </div>
           <div className="bg-gray-900 border border-gray-800 rounded-lg p-4">
-            <p className="text-gray-500 text-xs uppercase tracking-wide">Pop. Afetada</p>
+            <p className="text-gray-500 text-xs uppercase tracking-wide">População</p>
             <p className="text-2xl font-bold text-blue-400 mt-1">
               {formatN(detalhe.social.populacao)}
             </p>
-            <p className="text-gray-600 text-xs mt-0.5">habitantes</p>
+            <p className="text-gray-600 text-xs mt-0.5">IBGE 2025</p>
           </div>
         </section>
 
@@ -356,9 +430,9 @@ export default function MunicipioPage({ params }: { params: { nome: string } }) 
         {criticosTrans.length > 0 && (
           <section>
             <h3 className="text-lg font-semibold text-gray-300 mb-4">
-              Transformadores Críticos
+              Transformadores em Atenção
               <span className="ml-2 text-xs text-gray-500 font-normal">
-                (ordenados por score de risco do equipamento)
+                (criticidade estimada por idade + proximidade de religadores)
               </span>
             </h3>
             <div className="bg-gray-900 border border-gray-800 rounded-lg overflow-hidden">
@@ -396,11 +470,11 @@ export default function MunicipioPage({ params }: { params: { nome: string } }) 
                         </td>
                         <td className="px-3 py-2.5 text-center">
                           <span className={`inline-block px-2 py-0.5 rounded text-xs font-medium ${statusBadge(t.properties.status)}`}>
-                            {t.properties.status}
-                          </span>
-                        </td>
-                        <td className="px-3 py-2.5 text-right tabular-nums text-xs">
-                          <span className={scoreColor(t.properties.score_equipamento)}>
+                          {t.properties.status}
+                        </span>
+                      </td>
+                      <td className="px-3 py-2.5 text-right tabular-nums text-xs">
+                        <span className={scoreColor(t.properties.score_equipamento)}>
                             {t.properties.score_equipamento?.toFixed(0) ?? '—'}
                           </span>
                         </td>

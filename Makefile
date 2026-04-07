@@ -1,4 +1,4 @@
-.PHONY: help setup up down logs seed-demo ingest-ibge ingest-bdgd ingest-dec score pipeline-shell dev-backend dev-frontend
+.PHONY: help setup up down logs seed-demo ingest-ibge download-bdgd download-dec download-indqual ingest-bdgd ingest-dec score pipeline-shell dev-backend dev-frontend
 
 # ── Variáveis ─────────────────────────────────────────────────────────────────
 COMPOSE     = docker compose
@@ -18,10 +18,20 @@ help:
 	@echo "  make logs             Acompanha logs de todos os serviços"
 	@echo "  make logs s=backend   Acompanha logs de um serviço específico"
 	@echo ""
-	@echo "  make ingest-bdgd ARQUIVO=/data/bdgd.gpkg DISTRIBUIDORA='Equatorial AL' UF=AL"
-	@echo "                        Ingere um arquivo BDGD (.gpkg) no banco"
+	@echo "  make ingest-bdgd ARQUIVO=/data/bdgd.gdb.zip DISTRIBUIDORA='Enel Ceará' UF=CE"
+	@echo "                        Ingere um arquivo BDGD (.gpkg, .gdb ou .gdb.zip) no banco"
 	@echo "  make ingest-dec ARQUIVO=/data/dec_fec.csv"
 	@echo "                        Ingere arquivo DEC/FEC da ANEEL"
+	@echo "  make download-bdgd QUERY=ENEL_CE ANO=2024 SAIDA=/data/enel_ce_2024.gdb.zip"
+	@echo "                        Baixa a BDGD oficial no formato .gdb.zip"
+	@echo "  make download-dec SAIDA=/data/indicadores_continuidade.csv"
+	@echo "                        Baixa o CSV oficial de continuidade (apurado)"
+	@echo "  make download-dec TIPO=limite SAIDA=/data/indicadores_continuidade_limite.csv"
+	@echo "                        Baixa o CSV oficial de limites DEC/FEC"
+	@echo "  make download-indqual SAIDA=/data/indqual_municipio.csv"
+	@echo "                        Baixa o vínculo oficial IndQual → município"
+	@echo "  make ingest-dec ARQUIVO=/data/indicadores_continuidade.csv ARQUIVO_LIMITE=/data/indicadores_continuidade_limite.csv ARQUIVO_INDQUAL=/data/indqual_municipio.csv UF=CE DISTRIBUIDORA='Enel Ceará' LIMPAR=1"
+	@echo "                        Ingere continuidade oficial ANEEL agregada por município"
 	@echo "  make score            Recalcula scores de risco para todos os municípios"
 	@echo "  make score DISTRIBUIDORA='Equatorial AL'"
 	@echo "                        Recalcula scores de uma distribuidora específica"
@@ -78,9 +88,29 @@ ingest-ibge:
 		echo "Erro: informe UF=XX (ex: AL) ou UF=ALL para todos os estados"; exit 1; fi
 	$(PIPELINE) ingest_ibge_municipios.py --uf $(UF)
 
+download-bdgd:
+	@if [ -z "$(ITEM_ID)" ] && [ -z "$(QUERY)" ]; then \
+		echo "Erro: informe QUERY=ENEL_CE ou ITEM_ID=<arcgis-item-id>"; exit 1; fi
+	$(PIPELINE) download_aneel.py bdgd \
+		$(if $(QUERY),--query "$(QUERY)",) \
+		$(if $(ANO),--ano $(ANO),) \
+		$(if $(ITEM_ID),--item-id $(ITEM_ID),) \
+		$(if $(SAIDA),--saida $(SAIDA),)
+
+download-dec:
+	$(PIPELINE) download_aneel.py continuidade \
+		$(if $(TIPO),--tipo $(TIPO),) \
+		$(if $(RESOURCE_ID),--resource-id $(RESOURCE_ID),) \
+		$(if $(SAIDA),--saida $(SAIDA),)
+
+download-indqual:
+	$(PIPELINE) download_aneel.py indqual \
+		$(if $(RESOURCE_ID),--resource-id $(RESOURCE_ID),) \
+		$(if $(SAIDA),--saida $(SAIDA),)
+
 ingest-bdgd:
 	@if [ -z "$(ARQUIVO)" ]; then \
-		echo "Erro: informe ARQUIVO=/data/arquivo.gpkg"; exit 1; fi
+		echo "Erro: informe ARQUIVO=/data/arquivo.gpkg ou /data/arquivo.gdb.zip"; exit 1; fi
 	@if [ -z "$(DISTRIBUIDORA)" ]; then \
 		echo "Erro: informe DISTRIBUIDORA='Nome da Distribuidora'"; exit 1; fi
 	@if [ -z "$(UF)" ]; then \
@@ -93,7 +123,13 @@ ingest-bdgd:
 ingest-dec:
 	@if [ -z "$(ARQUIVO)" ]; then \
 		echo "Erro: informe ARQUIVO=/data/arquivo.csv"; exit 1; fi
-	$(PIPELINE) ingest_dec_fec.py --arquivo $(ARQUIVO)
+	$(PIPELINE) ingest_dec_fec.py \
+		--arquivo $(ARQUIVO) \
+		$(if $(ARQUIVO_LIMITE),--arquivo-limite $(ARQUIVO_LIMITE),) \
+		$(if $(ARQUIVO_INDQUAL),--arquivo-indqual $(ARQUIVO_INDQUAL),) \
+		$(if $(UF),--uf $(UF),) \
+		$(if $(DISTRIBUIDORA),--distribuidora "$(DISTRIBUIDORA)",) \
+		$(if $(LIMPAR),--limpar,)
 
 score:
 ifdef DISTRIBUIDORA
@@ -116,7 +152,11 @@ gaps:
 	$(PIPELINE) calculate_gaps.py $(if $(UF),--uf $(UF),) $(if $(DISTRIBUIDORA),--distribuidora "$(DISTRIBUIDORA)",)
 
 historico:
-	$(PIPELINE) calculate_historico.py
+	$(PIPELINE) calculate_historico.py \
+		$(if $(REBUILD),--rebuild,) \
+		$(if $(UF),--uf $(UF),) \
+		$(if $(DISTRIBUIDORA),--distribuidora "$(DISTRIBUIDORA)",) \
+		$(if $(LIMPAR),--limpar,)
 
 populacao:
 	@if [ -z "$(UF)" ]; then echo "Erro: informe UF=XX"; exit 1; fi

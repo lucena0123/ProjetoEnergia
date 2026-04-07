@@ -58,6 +58,11 @@ interface MunicipioDetalhe {
     domicilios?: number | null
     pib_per_capita?: number | null
   } | null
+  qualidade_dados?: {
+    infraestrutura?: 'sintetica' | 'real'
+    historico_meses_disponiveis?: number
+    historico_status?: 'completo' | 'parcial' | 'insuficiente'
+  }
 }
 
 function scoreClass(score: number | null): string {
@@ -271,7 +276,7 @@ export default function MapaRisco() {
                 : detail.tendencia === 'melhorando' ? '#4ade80'
                 : '#94a3b8'
 
-              const sparkSvg = detail.historico?.length
+              const sparkSvg = detail.historico && detail.historico.length > 1
                 ? sparklineSvg(detail.historico.map((item) => item.score_risco))
                 : ''
 
@@ -336,10 +341,18 @@ export default function MapaRisco() {
                     ${detail.social.pib_per_capita ? `<div style="font-size:11px;color:#cbd5e1;margin-top:2px">PIB per capita: <b style="color:#f1f5f9">R$ ${detail.social.pib_per_capita.toLocaleString('pt-BR')}</b></div>` : ''}
                   </div>` : ''}
 
+                  ${detail.qualidade_dados?.infraestrutura === 'sintetica' ? `
+                  <div style="font-size:10px;color:#fbbf24;background:#451a03;border:1px solid #b45309;border-radius:6px;padding:6px 8px;margin-bottom:6px">
+                    Base demonstrativa: infraestrutura e score ainda usam dados sintéticos.
+                  </div>` : ''}
+
                   ${sparkSvg ? `
                   <div style="margin-bottom:8px">
-                    <div style="font-size:9px;color:#64748b;margin-bottom:3px;text-transform:uppercase;letter-spacing:.05em">Historico de Score</div>
+                    <div style="font-size:9px;color:#64748b;margin-bottom:3px;text-transform:uppercase;letter-spacing:.05em">Historico de Score (${detail.qualidade_dados?.historico_meses_disponiveis ?? detail.historico?.length ?? 0} meses)</div>
                     ${sparkSvg}
+                  </div>` : detail.qualidade_dados?.historico_status === 'insuficiente' ? `
+                  <div style="font-size:10px;color:#94a3b8;margin-bottom:8px">
+                    Histórico insuficiente para indicar tendência com confiança.
                   </div>` : ''}
 
                   <a href="/municipio/${encodeURIComponent(detail.municipio)}"

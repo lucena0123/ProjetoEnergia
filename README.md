@@ -118,21 +118,55 @@ open http://localhost:3000/mapa   # Mapa interativo
 ## Uso com dados reais da ANEEL
 
 ```bash
-# Polígonos municipais (qualquer estado, API IBGE — automático)
+# Polígonos municipais (obrigatório antes da BDGD; usados no vínculo municipal)
 make ingest-ibge UF=AL
 
-# Rede elétrica (baixe o .gpkg da BDGD em dadosabertos.aneel.gov.br)
-make ingest-bdgd \
-  ARQUIVO=/data/bdgd_AL_2023.gpkg \
-  DISTRIBUIDORA='Equatorial Alagoas' \
-  UF=AL
+# Rede elétrica (baixa a BDGD oficial da ANEEL em .gdb.zip)
+make download-bdgd \
+  QUERY=ENEL_CE \
+  ANO=2024 \
+  SAIDA=/data/enel_ce_2024.gdb.zip
 
-# Indicadores de continuidade (baixe o CSV da ANEEL)
-make ingest-dec ARQUIVO=/data/indicadores_dec_fec_2023.csv
+make ingest-bdgd \
+  ARQUIVO=/data/enel_ce_2024.gdb.zip \
+  DISTRIBUIDORA='Enel Ceará' \
+  UF=CE
+
+# Continuidade oficial ANEEL: apurado + limite + vínculo IndQual → município
+make download-dec SAIDA=/data/indicadores_continuidade.csv
+make download-dec TIPO=limite SAIDA=/data/indicadores_continuidade_limite.csv
+make download-indqual SAIDA=/data/indqual_municipio.csv
+
+# Agrega DEC/FEC por município usando NumCon como peso
+make ingest-dec \
+  ARQUIVO=/data/indicadores_continuidade.csv \
+  ARQUIVO_LIMITE=/data/indicadores_continuidade_limite.csv \
+  ARQUIVO_INDQUAL=/data/indqual_municipio.csv \
+  UF=CE \
+  DISTRIBUIDORA='Enel Ceará' \
+  LIMPAR=1
 
 # Calcula scores de risco
 make score
 ```
+
+Observações importantes:
+- A ingestão da BDGD depende das malhas do IBGE para preencher `municipio` por `spatial join`.
+- O artefato oficial da BDGD normalmente vem como `File Geodatabase` compactada (`.gdb.zip`). O importador também aceita `.gdb` e `.gpkg`.
+- O parâmetro `QUERY` do `download-bdgd` usa o termo do portal ArcGIS da ANEEL, como `ENEL_CE`. Se você já souber o `item id`, pode usar `ITEM_ID=<arcgis-item-id>`.
+- Na continuidade, a ANEEL publica o apurado, os limites e a chave `IndQual Município` em arquivos separados.
+- No modo oficial, `ingest_dec_fec.py` junta esses 3 arquivos e agrega os conjuntos para município ponderando por `NumCon`.
+- `score_risco`, `cobertura` e criticidade de equipamentos continuam sendo métricas derivadas do projeto, mesmo quando a base elétrica é real.
+- Enquanto a infraestrutura vier do `seed_demo.py`, a UI deve ser tratada como demonstrativa.
+
+---
+
+## Confiabilidade dos dados
+
+- `IBGE`: malhas, população, densidade.
+- `ANEEL`: BDGD, DEC/FEC.
+- `Derivado pelo projeto`: score de risco, gaps de proteção, criticidade estimada de transformadores, tendência.
+- `Demo`: qualquer ativo com `cod_id` no padrão `*-DEMO-*` foi gerado sinteticamente e não representa inventário operacional real.
 
 ---
 
@@ -220,8 +254,11 @@ python seed_demo.py --uf AL
 make setup                  Configura .env e sobe toda a stack
 make seed-demo              Popula banco com dados de demonstração (AL)
 make ingest-ibge UF=AL      Importa polígonos municipais do IBGE
-make ingest-bdgd ...        Ingere arquivo BDGD (.gpkg)
-make ingest-dec ...         Ingere indicadores DEC/FEC (.csv)
+make download-bdgd ...      Baixa BDGD oficial da ANEEL (.gdb.zip)
+make ingest-bdgd ...        Ingere arquivo BDGD (.gpkg, .gdb ou .gdb.zip)
+make download-dec ...       Baixa CSV oficial de continuidade ANEEL
+make download-indqual ...   Baixa vínculo oficial IndQual → município
+make ingest-dec ...         Ingere continuidade municipal (legado ou oficial)
 make score                  Recalcula todos os scores de risco
 make logs s=backend         Acompanha logs de um serviço
 make pipeline-shell         Shell interativo no container Python
@@ -236,7 +273,8 @@ make down                   Para todos os containers
 gridrisk/
 ├── pipeline/                   Scripts Python de ingestão
 │   ├── ingest_ibge_municipios.py   Polígonos municipais (IBGE API)
-│   ├── ingest_bdgd.py              Rede elétrica (GeoPackage ANEEL)
+│   ├── download_aneel.py           Download oficial BDGD + DEC/FEC (ANEEL)
+│   ├── ingest_bdgd.py              Rede elétrica (GeoPackage/FileGDB ANEEL)
 │   ├── ingest_dec_fec.py           Indicadores DEC/FEC (CSV ANEEL)
 │   ├── calculate_risk.py           Scoring de risco por município
 │   ├── seed_demo.py                Dados de demonstração automáticos
