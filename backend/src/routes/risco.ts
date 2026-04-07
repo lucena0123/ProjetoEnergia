@@ -14,6 +14,7 @@ interface MapaRiscoRow {
   ratio_dec: number | null
   meses_violacao: number | null
   idade_media_anos: number | null
+  geometry: object | null
 }
 
 interface KpisRow {
@@ -57,9 +58,10 @@ const rankingSchema = {
 
 /**
  * Builds a WHERE clause and params array from optional filter args.
- * Returns { where: string; params: unknown[]; nextIndex: number }
+ * Pass a table alias (e.g. 'mr') to prefix columns when using JOINs.
  */
 function buildFilters(
+  tableAlias: string | undefined,
   distribuidora: string | undefined,
   uf: string | undefined,
   startIndex = 1,
@@ -67,15 +69,16 @@ function buildFilters(
   const conditions: string[] = []
   const params: unknown[] = []
   let idx = startIndex
+  const prefix = tableAlias ? `${tableAlias}.` : ''
 
   if (distribuidora) {
-    conditions.push(`distribuidora ILIKE $${idx}`)
+    conditions.push(`${prefix}distribuidora ILIKE $${idx}`)
     params.push(`%${distribuidora}%`)
     idx++
   }
 
   if (uf) {
-    conditions.push(`uf = $${idx}`)
+    conditions.push(`${prefix}uf = $${idx}`)
     params.push(uf.toUpperCase())
     idx++
   }
@@ -92,10 +95,11 @@ export const riscoRoutes: FastifyPluginAsync = async (fastify: FastifyInstance) 
   /**
    * GET /api/mapa-risco
    *
-   * Returns a GeoJSON FeatureCollection of risk scores per municipality.
-   * Geometry is null for now — TODO: join with a municipality boundary table
-   * (e.g. from IBGE / BDGD geographic reference layer) to attach real centroids
-   * or polygons once that data is loaded into the database.
+   * Returns a GeoJSON FeatureCollection of risk scores per municipality,
+   * joined with IBGE municipality boundaries (ibge_municipios table).
+   * Features without a matching boundary still appear with geometry: null
+   * so the ranking sidebar and popup remain functional even before the
+   * IBGE layer is loaded.
    */
   fastify.get(
     '/mapa-risco',
@@ -107,31 +111,32 @@ export const riscoRoutes: FastifyPluginAsync = async (fastify: FastifyInstance) 
       reply: FastifyReply,
     ) => {
       const { distribuidora, uf } = request.query
-      const { where, params } = buildFilters(distribuidora, uf)
+      const { where, params } = buildFilters('mr', distribuidora, uf)
 
       const sql = `
         SELECT
-          municipio,
-          distribuidora,
-          uf,
-          score_risco,
-          dec_medio_12m,
-          ratio_dec,
-          meses_violacao,
-          idade_media_anos
-        FROM mapa_risco
+          mr.municipio,
+          mr.distribuidora,
+          mr.uf,
+          mr.score_risco,
+          mr.dec_medio_12m,
+          mr.ratio_dec,
+          mr.meses_violacao,
+          mr.idade_media_anos,
+          ST_AsGeoJSON(ST_Transform(im.geom, 4326))::json AS geometry
+        FROM mapa_risco mr
+        LEFT JOIN ibge_municipios im
+          ON im.nome_norm = lower(unaccent(mr.municipio))
+         AND im.uf        = mr.uf
         ${where}
-        ORDER BY score_risco DESC NULLS LAST
+        ORDER BY mr.score_risco DESC NULLS LAST
       `
 
       const result = await pgPool.query<MapaRiscoRow>(sql, params)
 
-      // TODO: Replace null geometry with actual municipality centroid once a
-      // municipalities boundary table (ibge_municipios or similar) is populated.
-      // Example join: ST_AsGeoJSON(ST_Centroid(m.geom))::json AS geometry
       const features = result.rows.map((row) => ({
         type: 'Feature' as const,
-        geometry: null,
+        geometry: row.geometry ?? null,
         properties: {
           municipio: row.municipio,
           distribuidora: row.distribuidora,
@@ -175,7 +180,7 @@ export const riscoRoutes: FastifyPluginAsync = async (fastify: FastifyInstance) 
       const offset = (page - 1) * limit
 
       const { distribuidora, uf } = request.query
-      const { where, params, nextIndex } = buildFilters(distribuidora, uf)
+      const { where, params, nextIndex } = buildFilters(undefined, distribuidora, uf)
 
       // Count query
       const countSql = `SELECT COUNT(*) AS total FROM mapa_risco ${where}`

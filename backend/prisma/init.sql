@@ -6,6 +6,7 @@
 -- Enable PostGIS extensions
 CREATE EXTENSION IF NOT EXISTS postgis;
 CREATE EXTENSION IF NOT EXISTS postgis_topology;
+CREATE EXTENSION IF NOT EXISTS unaccent;
 
 -- -------------------------------------------------------------
 -- rede_mt: Medium-voltage grid segments (LineString geometry)
@@ -123,3 +124,23 @@ CREATE INDEX IF NOT EXISTS idx_subs_geom    ON subestacoes  USING GIST(geom);
 
 -- Composite index for continuity indicator lookups
 CREATE INDEX IF NOT EXISTS idx_ic_municipio ON indicadores_continuidade(municipio, ano, mes);
+
+-- -------------------------------------------------------------
+-- ibge_municipios: Municipality boundaries from IBGE
+-- Source: https://servicodados.ibge.gov.br/api/v3/malhas/municipios
+-- CRS: SIRGAS 2000 (EPSG:4674)
+-- -------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS ibge_municipios (
+  id           SERIAL PRIMARY KEY,
+  codigo_ibge  VARCHAR(7) UNIQUE NOT NULL,
+  nome         VARCHAR(120)      NOT NULL,
+  nome_norm    VARCHAR(120)      NOT NULL,  -- lower + unaccented, for JOIN
+  uf           CHAR(2)           NOT NULL,
+  geom         GEOMETRY(MultiPolygon, 4674)
+);
+
+CREATE INDEX IF NOT EXISTS idx_ibge_municipios_geom
+  ON ibge_municipios USING GIST(geom);
+
+CREATE INDEX IF NOT EXISTS idx_ibge_municipios_nome
+  ON ibge_municipios(nome_norm, uf);

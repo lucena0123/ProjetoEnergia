@@ -1,4 +1,4 @@
-.PHONY: help setup up down logs ingest-bdgd ingest-dec score pipeline-shell dev-backend dev-frontend
+.PHONY: help setup up down logs ingest-ibge ingest-bdgd ingest-dec score pipeline-shell dev-backend dev-frontend
 
 # ── Variáveis ─────────────────────────────────────────────────────────────────
 COMPOSE     = docker compose
@@ -25,6 +25,11 @@ help:
 	@echo "  make score            Recalcula scores de risco para todos os municípios"
 	@echo "  make score DISTRIBUIDORA='Equatorial AL'"
 	@echo "                        Recalcula scores de uma distribuidora específica"
+	@echo ""
+	@echo "  make ingest-ibge UF=AL"
+	@echo "                        Importa polígonos municipais do IBGE para um estado"
+	@echo "  make ingest-ibge UF=ALL"
+	@echo "                        Importa polígonos de todos os 27 estados"
 	@echo ""
 	@echo "  make pipeline-shell   Abre shell interativo no container Python"
 	@echo "  make dev-backend      Inicia backend em modo dev (hot-reload)"
@@ -62,6 +67,11 @@ else
 endif
 
 # ── Pipeline de dados ─────────────────────────────────────────────────────────
+ingest-ibge:
+	@if [ -z "$(UF)" ]; then \
+		echo "Erro: informe UF=XX (ex: AL) ou UF=ALL para todos os estados"; exit 1; fi
+	$(PIPELINE) ingest_ibge_municipios.py --uf $(UF)
+
 ingest-bdgd:
 	@if [ -z "$(ARQUIVO)" ]; then \
 		echo "Erro: informe ARQUIVO=/data/arquivo.gpkg"; exit 1; fi

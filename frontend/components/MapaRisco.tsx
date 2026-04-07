@@ -8,7 +8,7 @@ const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001'
 
 mapboxgl.accessToken = process.env.NEXT_PUBLIC_MAPBOX_TOKEN || ''
 
-interface MunicipioRiscoProperties {
+interface MunicipioProps {
   municipio: string
   distribuidora: string
   uf: string
@@ -18,25 +18,11 @@ interface MunicipioRiscoProperties {
   idade_media_anos: number | null
 }
 
-interface MunicipioRiscoFeature extends GeoJSON.Feature {
-  properties: MunicipioRiscoProperties
-}
-
 interface RankingItem {
   municipio: string
   distribuidora: string
   uf: string
   score_risco: number
-}
-
-type LayerToggle = 'rede_mt' | 'transformadores' | 'religadores'
-
-function scoreLabel(score: number | null): string {
-  if (score == null) return '—'
-  if (score >= 80) return 'Crítico'
-  if (score >= 60) return 'Alto'
-  if (score >= 40) return 'Médio'
-  return 'Baixo'
 }
 
 function scoreClass(score: number | null): string {
@@ -47,28 +33,34 @@ function scoreClass(score: number | null): string {
   return 'text-green-400 font-bold'
 }
 
+function removeLayer(m: mapboxgl.Map, id: string) {
+  if (m.getLayer(id)) m.removeLayer(id)
+  if (m.getSource(id)) m.removeSource(id)
+}
+
 export default function MapaRisco() {
   const mapContainer = useRef<HTMLDivElement | null>(null)
   const map = useRef<mapboxgl.Map | null>(null)
   const popupRef = useRef<mapboxgl.Popup | null>(null)
 
-  const [activeLayers, setActiveLayers] = useState<Set<LayerToggle>>(new Set())
+  const [mapLoaded, setMapLoaded] = useState(false)
+  const [redeMtActive, setRedeMtActive] = useState(false)
+  const [transActive, setTransActive] = useState(false)
+  const [selectedMunicipio, setSelectedMunicipio] = useState<MunicipioProps | null>(null)
+  const [hint, setHint] = useState<string | null>(null)
   const [ranking, setRanking] = useState<RankingItem[]>([])
   const [rankingLoading, setRankingLoading] = useState(true)
-  const [mapLoaded, setMapLoaded] = useState(false)
 
-  // Fetch top-10 ranking for sidebar
+  // ── Sidebar ranking ────────────────────────────────────────────────────────
   useEffect(() => {
     fetch(`${API_URL}/api/ranking-municipios?limit=10&page=1`)
       .then((r) => r.json())
-      .then((d) => {
-        setRanking(d.data ?? [])
-      })
+      .then((d) => setRanking(d.data ?? []))
       .catch(console.error)
       .finally(() => setRankingLoading(false))
   }, [])
 
-  // Initialize map
+  // ── Map init ───────────────────────────────────────────────────────────────
   useEffect(() => {
     if (map.current || !mapContainer.current) return
 
@@ -81,112 +73,119 @@ export default function MapaRisco() {
     })
 
     map.current.addControl(new mapboxgl.NavigationControl(), 'top-left')
-    map.current.addControl(
-      new mapboxgl.AttributionControl({ compact: true }),
-      'bottom-left',
-    )
+    map.current.addControl(new mapboxgl.AttributionControl({ compact: true }), 'bottom-left')
 
     map.current.on('load', () => {
       setMapLoaded(true)
 
-      // Fetch and add mapa-risco GeoJSON
       fetch(`${API_URL}/api/mapa-risco`)
         .then((r) => r.json())
         .then((geojson: GeoJSON.FeatureCollection) => {
           if (!map.current) return
 
-          // Filter out features with null geometry
-          const validFeatures = geojson.features.filter((f) => f.geometry !== null)
-          const validGeojson: GeoJSON.FeatureCollection = {
+          const valid: GeoJSON.FeatureCollection = {
             type: 'FeatureCollection',
-            features: validFeatures,
+            features: geojson.features.filter((f) => f.geometry !== null),
           }
 
-          map.current.addSource('municipios-risco', {
-            type: 'geojson',
-            data: validGeojson,
-          })
+          if (valid.features.length === 0) return
 
-          // Fill layer with score-based color interpolation
+          map.current.addSource('municipios-risco', { type: 'geojson', data: valid })
+
           map.current.addLayer({
             id: 'municipios-fill',
             type: 'fill',
             source: 'municipios-risco',
             paint: {
               'fill-color': [
-                'interpolate',
-                ['linear'],
+                'interpolate', ['linear'],
                 ['coalesce', ['get', 'score_risco'], 0],
-                0, '#00ff00',
-                50, '#ffff00',
-                80, '#ff4400',
+                0,   '#00ff00',
+                50,  '#ffff00',
+                80,  '#ff4400',
                 100, '#ff0000',
               ],
-              'fill-opacity': 0.7,
+              'fill-opacity': 0.65,
             },
           })
 
-          // Border layer
           map.current.addLayer({
             id: 'municipios-border',
             type: 'line',
             source: 'municipios-risco',
-            paint: {
-              'line-color': '#ffffff',
-              'line-width': 0.5,
-              'line-opacity': 0.4,
-            },
+            paint: { 'line-color': '#ffffff', 'line-width': 0.5, 'line-opacity': 0.35 },
           })
 
-          // Click handler for municipality popup
-          map.current.on('click', 'municipios-fill', (e) => {
-            if (!e.features || e.features.length === 0 || !map.current) return
+          // Highlight layer (selected municipality)
+          map.current.addLayer({
+            id: 'municipios-selected',
+            type: 'line',
+            source: 'municipios-risco',
+            paint: { 'line-color': '#38bdf8', 'line-width': 2.5 },
+            filter: ['==', ['get', 'municipio'], ''],
+          })
 
-            const feature = e.features[0] as MunicipioRiscoFeature
-            const props = feature.properties
+          // Fit bounds to data
+          const coords = valid.features.flatMap((f) => {
+            if (!f.geometry) return []
+            const g = f.geometry as GeoJSON.MultiPolygon | GeoJSON.Polygon
+            if (g.type === 'MultiPolygon') return g.coordinates.flat(2)
+            if (g.type === 'Polygon') return g.coordinates.flat(1)
+            return []
+          }) as [number, number][]
+
+          if (coords.length > 0) {
+            const lngs = coords.map((c) => c[0])
+            const lats = coords.map((c) => c[1])
+            map.current.fitBounds(
+              [[Math.min(...lngs), Math.min(...lats)], [Math.max(...lngs), Math.max(...lats)]],
+              { padding: 40, duration: 800 },
+            )
+          }
+
+          // ── Click handler ────────────────────────────────────────────────
+          map.current.on('click', 'municipios-fill', (e) => {
+            if (!e.features?.length || !map.current) return
+            const props = e.features[0].properties as MunicipioProps
+            setSelectedMunicipio(props)
+
+            // Update highlight filter
+            map.current.setFilter('municipios-selected', ['==', ['get', 'municipio'], props.municipio])
 
             if (popupRef.current) popupRef.current.remove()
-
             const score = props.score_risco
-            const html = `
-              <div style="font-family: system-ui, sans-serif; min-width: 200px;">
-                <div style="font-size: 14px; font-weight: 700; margin-bottom: 8px; color: #f1f5f9;">
-                  ${props.municipio}
-                </div>
-                <div style="font-size: 11px; color: #94a3b8; margin-bottom: 8px;">${props.distribuidora} — ${props.uf}</div>
-                <table style="width: 100%; border-collapse: collapse; font-size: 12px;">
-                  <tr>
-                    <td style="padding: 3px 0; color: #94a3b8;">Score de Risco</td>
-                    <td style="padding: 3px 0; text-align: right; font-weight: 700; color: ${
-                      score == null ? '#94a3b8'
-                      : score >= 80 ? '#f87171'
-                      : score >= 60 ? '#fb923c'
-                      : score >= 40 ? '#facc15'
-                      : '#4ade80'
-                    };">${score?.toFixed(1) ?? '—'} / 100</td>
-                  </tr>
-                  <tr>
-                    <td style="padding: 3px 0; color: #94a3b8;">DEC Médio 12m</td>
-                    <td style="padding: 3px 0; text-align: right; color: #e2e8f0;">${props.dec_medio_12m?.toFixed(2) ?? '—'} h</td>
-                  </tr>
-                  <tr>
-                    <td style="padding: 3px 0; color: #94a3b8;">Meses c/ Violação</td>
-                    <td style="padding: 3px 0; text-align: right; color: #e2e8f0;">${props.meses_violacao ?? '—'} / 12</td>
-                  </tr>
-                  <tr>
-                    <td style="padding: 3px 0; color: #94a3b8;">Idade Média Rede</td>
-                    <td style="padding: 3px 0; text-align: right; color: #e2e8f0;">${props.idade_media_anos?.toFixed(1) ?? '—'} anos</td>
-                  </tr>
-                </table>
-              </div>
-            `
+            const scoreColor =
+              score == null ? '#94a3b8'
+              : score >= 80 ? '#f87171'
+              : score >= 60 ? '#fb923c'
+              : score >= 40 ? '#facc15'
+              : '#4ade80'
 
-            popupRef.current = new mapboxgl.Popup({
-              closeButton: true,
-              className: 'gridrisk-popup',
-            })
+            popupRef.current = new mapboxgl.Popup({ closeButton: true, className: 'gridrisk-popup' })
               .setLngLat(e.lngLat)
-              .setHTML(html)
+              .setHTML(`
+                <div style="font-family:system-ui,sans-serif;min-width:200px">
+                  <div style="font-size:14px;font-weight:700;margin-bottom:6px;color:#f1f5f9">${props.municipio}</div>
+                  <div style="font-size:11px;color:#94a3b8;margin-bottom:10px">${props.distribuidora} — ${props.uf}</div>
+                  <table style="width:100%;border-collapse:collapse;font-size:12px">
+                    <tr>
+                      <td style="padding:3px 0;color:#94a3b8">Score de Risco</td>
+                      <td style="padding:3px 0;text-align:right;font-weight:700;color:${scoreColor}">${score?.toFixed(1) ?? '—'} / 100</td>
+                    </tr>
+                    <tr>
+                      <td style="padding:3px 0;color:#94a3b8">DEC Médio 12m</td>
+                      <td style="padding:3px 0;text-align:right;color:#e2e8f0">${props.dec_medio_12m?.toFixed(2) ?? '—'} h</td>
+                    </tr>
+                    <tr>
+                      <td style="padding:3px 0;color:#94a3b8">Meses c/ Violação</td>
+                      <td style="padding:3px 0;text-align:right;color:#e2e8f0">${props.meses_violacao ?? '—'} / 12</td>
+                    </tr>
+                    <tr>
+                      <td style="padding:3px 0;color:#94a3b8">Idade Média Rede</td>
+                      <td style="padding:3px 0;text-align:right;color:#e2e8f0">${props.idade_media_anos?.toFixed(1) ?? '—'} anos</td>
+                    </tr>
+                  </table>
+                </div>`)
               .addTo(map.current)
           })
 
@@ -197,121 +196,169 @@ export default function MapaRisco() {
             if (map.current) map.current.getCanvas().style.cursor = ''
           })
         })
-        .catch((err) => console.error('[MapaRisco] Failed to load mapa-risco:', err))
+        .catch((err) => console.error('[MapaRisco] mapa-risco load failed:', err))
     })
 
     return () => {
-      if (popupRef.current) popupRef.current.remove()
+      popupRef.current?.remove()
       map.current?.remove()
       map.current = null
     }
   }, [])
 
-  const toggleLayer = useCallback(
-    async (layerName: LayerToggle) => {
-      if (!map.current || !mapLoaded) return
+  // ── Rede MT toggle ─────────────────────────────────────────────────────────
+  const toggleRedeMt = useCallback(async () => {
+    if (!map.current || !mapLoaded) return
+    if (redeMtActive) {
+      removeLayer(map.current, 'rede_mt-layer')
+      setRedeMtActive(false)
+      return
+    }
+    try {
+      const res = await fetch(`${API_URL}/api/trechos-criticos?score_min=0&limit=500`)
+      const geojson: GeoJSON.FeatureCollection = await res.json()
+      if (map.current.getSource('rede_mt-layer')) return
+      map.current.addSource('rede_mt-layer', { type: 'geojson', data: geojson })
+      map.current.addLayer({
+        id: 'rede_mt-layer',
+        type: 'line',
+        source: 'rede_mt-layer',
+        paint: {
+          'line-color': [
+            'interpolate', ['linear'], ['coalesce', ['get', 'score_risco'], 0],
+            0, '#60a5fa', 70, '#f97316', 100, '#ef4444',
+          ],
+          'line-width': 1.5,
+          'line-opacity': 0.9,
+        },
+      })
+      setRedeMtActive(true)
+    } catch (err) {
+      console.error('[MapaRisco] rede_mt load failed:', err)
+    }
+  }, [mapLoaded, redeMtActive])
 
-      const isActive = activeLayers.has(layerName)
+  // ── Transformadores toggle ─────────────────────────────────────────────────
+  // Requires a selected municipality. Shows a hint if none is selected.
+  const toggleTransformadores = useCallback(async () => {
+    if (!map.current || !mapLoaded) return
 
-      if (isActive) {
-        // Remove layer and source
-        if (map.current.getLayer(`${layerName}-layer`)) {
-          map.current.removeLayer(`${layerName}-layer`)
-        }
-        if (map.current.getSource(layerName)) {
-          map.current.removeSource(layerName)
-        }
-        setActiveLayers((prev) => {
-          const next = new Set(prev)
-          next.delete(layerName)
-          return next
-        })
+    if (transActive) {
+      removeLayer(map.current, 'transformadores-layer')
+      setTransActive(false)
+      setHint(null)
+      return
+    }
+
+    if (!selectedMunicipio) {
+      setHint('Clique em um município no mapa para ver os transformadores')
+      setTimeout(() => setHint(null), 3500)
+      return
+    }
+
+    try {
+      const url = `${API_URL}/api/transformadores-criticos?municipio=${encodeURIComponent(selectedMunicipio.municipio)}`
+      const res = await fetch(url)
+      const geojson: GeoJSON.FeatureCollection = await res.json()
+
+      if (map.current.getSource('transformadores-layer')) {
+        // Refresh data for new municipality
+        const src = map.current.getSource('transformadores-layer') as mapboxgl.GeoJSONSource
+        src.setData(geojson)
       } else {
-        // Fetch and add layer
-        try {
-          let url: string
-          if (layerName === 'rede_mt') {
-            url = `${API_URL}/api/trechos-criticos?score_min=0&limit=500`
-          } else if (layerName === 'transformadores') {
-            // Load transformadores for all (no municipio filter — may be heavy)
-            url = `${API_URL}/api/transformadores-criticos?municipio=`
-            // Skip if no municipio — show a tip
-            console.warn('[MapaRisco] transformadores layer requires a municipio filter')
-            return
-          } else {
-            // religadores not exposed yet — skip gracefully
-            console.warn('[MapaRisco] religadores layer endpoint not yet available')
-            return
-          }
-
-          const res = await fetch(url)
-          const geojson: GeoJSON.FeatureCollection = await res.json()
-
-          if (map.current.getSource(layerName)) return // already added
-
-          map.current.addSource(layerName, { type: 'geojson', data: geojson })
-
-          if (layerName === 'rede_mt') {
-            map.current.addLayer({
-              id: `${layerName}-layer`,
-              type: 'line',
-              source: layerName,
-              paint: {
-                'line-color': [
-                  'interpolate',
-                  ['linear'],
-                  ['coalesce', ['get', 'score_risco'], 0],
-                  0, '#60a5fa',
-                  70, '#f97316',
-                  100, '#ef4444',
-                ],
-                'line-width': 1.5,
-                'line-opacity': 0.9,
-              },
-            })
-          }
-
-          setActiveLayers((prev) => new Set([...prev, layerName]))
-        } catch (err) {
-          console.error(`[MapaRisco] Failed to load layer ${layerName}:`, err)
-        }
+        map.current.addSource('transformadores-layer', { type: 'geojson', data: geojson })
+        map.current.addLayer({
+          id: 'transformadores-layer',
+          type: 'circle',
+          source: 'transformadores-layer',
+          paint: {
+            'circle-radius': 4,
+            'circle-color': [
+              'interpolate', ['linear'], ['coalesce', ['get', 'score_risco'], 0],
+              0, '#34d399', 70, '#fb923c', 100, '#ef4444',
+            ],
+            'circle-stroke-width': 1,
+            'circle-stroke-color': '#1e293b',
+            'circle-opacity': 0.9,
+          },
+        })
       }
-    },
-    [mapLoaded, activeLayers],
-  )
+      setTransActive(true)
+      setHint(null)
+    } catch (err) {
+      console.error('[MapaRisco] transformadores load failed:', err)
+    }
+  }, [mapLoaded, transActive, selectedMunicipio])
 
-  const layerButtons: { key: LayerToggle; label: string }[] = [
-    { key: 'rede_mt', label: 'Rede MT' },
-    { key: 'transformadores', label: 'Transformadores' },
-    { key: 'religadores', label: 'Religadores' },
-  ]
+  // Re-load transformadores when selected municipality changes while layer is active
+  useEffect(() => {
+    if (!transActive || !selectedMunicipio || !map.current) return
+    fetch(`${API_URL}/api/transformadores-criticos?municipio=${encodeURIComponent(selectedMunicipio.municipio)}`)
+      .then((r) => r.json())
+      .then((geojson: GeoJSON.FeatureCollection) => {
+        const src = map.current?.getSource('transformadores-layer') as mapboxgl.GeoJSONSource | undefined
+        src?.setData(geojson)
+      })
+      .catch(console.error)
+  }, [selectedMunicipio, transActive])
 
   return (
     <div className="relative w-full h-screen">
-      {/* Map container */}
       <div ref={mapContainer} className="w-full h-full" />
 
-      {/* Layer toggles — bottom left above attribution */}
+      {/* Hint toast */}
+      {hint && (
+        <div className="absolute top-20 left-1/2 -translate-x-1/2 z-20 bg-yellow-900/90 border border-yellow-700 text-yellow-200 text-xs px-4 py-2 rounded-lg shadow-lg backdrop-blur-sm">
+          {hint}
+        </div>
+      )}
+
+      {/* Layer toggles */}
       <div className="absolute bottom-10 left-3 z-10 flex flex-col gap-1.5">
-        {layerButtons.map(({ key, label }) => {
-          const active = activeLayers.has(key)
-          return (
-            <button
-              key={key}
-              onClick={() => toggleLayer(key)}
-              className={`px-3 py-1.5 text-xs font-medium rounded border transition-colors backdrop-blur-sm ${
-                active
-                  ? 'bg-blue-600 border-blue-500 text-white'
-                  : 'bg-gray-900/80 border-gray-700 text-gray-300 hover:bg-gray-800 hover:text-white'
-              }`}
-            >
-              {label}
-            </button>
-          )
-        })}
+        <button
+          onClick={toggleRedeMt}
+          className={`px-3 py-1.5 text-xs font-medium rounded border transition-colors backdrop-blur-sm ${
+            redeMtActive
+              ? 'bg-blue-600 border-blue-500 text-white'
+              : 'bg-gray-900/80 border-gray-700 text-gray-300 hover:bg-gray-800 hover:text-white'
+          }`}
+        >
+          Rede MT
+        </button>
+
+        <button
+          onClick={toggleTransformadores}
+          title={!selectedMunicipio ? 'Clique em um município primeiro' : undefined}
+          className={`px-3 py-1.5 text-xs font-medium rounded border transition-colors backdrop-blur-sm ${
+            transActive
+              ? 'bg-blue-600 border-blue-500 text-white'
+              : selectedMunicipio
+              ? 'bg-gray-900/80 border-gray-700 text-gray-300 hover:bg-gray-800 hover:text-white'
+              : 'bg-gray-900/60 border-gray-800 text-gray-500 cursor-help'
+          }`}
+        >
+          Transformadores
+          {!selectedMunicipio && (
+            <span className="ml-1 text-gray-600">*</span>
+          )}
+        </button>
+
+        <button
+          disabled
+          title="Endpoint em desenvolvimento"
+          className="px-3 py-1.5 text-xs font-medium rounded border bg-gray-900/40 border-gray-800 text-gray-600 cursor-not-allowed"
+        >
+          Religadores
+        </button>
+
+        {selectedMunicipio && (
+          <div className="mt-1 px-2 py-1 text-xs text-gray-400 bg-gray-900/80 border border-gray-700 rounded backdrop-blur-sm max-w-[160px] truncate">
+            {selectedMunicipio.municipio}
+          </div>
+        )}
       </div>
 
-      {/* Ranking sidebar — right side */}
+      {/* Ranking sidebar */}
       <div className="absolute top-14 right-3 z-10 w-64 bg-gray-900/90 backdrop-blur-sm border border-gray-700 rounded-lg overflow-hidden">
         <div className="px-3 py-2.5 border-b border-gray-700">
           <h3 className="text-xs font-semibold text-gray-300 uppercase tracking-wider">
@@ -326,9 +373,7 @@ export default function MapaRisco() {
               ))}
             </div>
           ) : ranking.length === 0 ? (
-            <div className="px-3 py-4 text-xs text-gray-500 text-center">
-              Sem dados disponíveis
-            </div>
+            <div className="px-3 py-4 text-xs text-gray-500 text-center">Sem dados disponíveis</div>
           ) : (
             <ul>
               {ranking.map((item, idx) => (
@@ -336,13 +381,9 @@ export default function MapaRisco() {
                   key={`${item.municipio}-${item.uf}`}
                   className="flex items-center gap-2 px-3 py-2 border-b border-gray-800/60 hover:bg-gray-800/50 transition-colors"
                 >
-                  <span className="text-xs text-gray-500 font-mono w-5 shrink-0">
-                    {idx + 1}
-                  </span>
+                  <span className="text-xs text-gray-500 font-mono w-5 shrink-0">{idx + 1}</span>
                   <div className="flex-1 min-w-0">
-                    <div className="text-xs font-medium text-white truncate">
-                      {item.municipio}
-                    </div>
+                    <div className="text-xs font-medium text-white truncate">{item.municipio}</div>
                     <div className="text-xs text-gray-500 truncate">{item.uf}</div>
                   </div>
                   <span className={`text-xs tabular-nums shrink-0 ${scoreClass(item.score_risco)}`}>
@@ -355,7 +396,6 @@ export default function MapaRisco() {
         </div>
       </div>
 
-      {/* Global popup styles injected inline */}
       <style>{`
         .gridrisk-popup .mapboxgl-popup-content {
           background: #1e293b;
@@ -364,18 +404,9 @@ export default function MapaRisco() {
           padding: 12px;
           box-shadow: 0 10px 25px rgba(0,0,0,0.5);
         }
-        .gridrisk-popup .mapboxgl-popup-tip {
-          border-top-color: #1e293b;
-        }
-        .gridrisk-popup .mapboxgl-popup-close-button {
-          color: #94a3b8;
-          font-size: 16px;
-          padding: 4px 8px;
-        }
-        .gridrisk-popup .mapboxgl-popup-close-button:hover {
-          color: #f1f5f9;
-          background: transparent;
-        }
+        .gridrisk-popup .mapboxgl-popup-tip { border-top-color: #1e293b; }
+        .gridrisk-popup .mapboxgl-popup-close-button { color: #94a3b8; font-size: 16px; padding: 4px 8px; }
+        .gridrisk-popup .mapboxgl-popup-close-button:hover { color: #f1f5f9; background: transparent; }
       `}</style>
     </div>
   )
