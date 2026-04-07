@@ -7,7 +7,7 @@ into the ibge_municipios table.  The operation is idempotent: existing rows
 for a given UF are deleted before re-inserting.
 
 Data sources (both public and free):
-  Geometry: https://servicodados.ibge.gov.br/api/v3/malhas/estados/{code}/municipios
+  Geometry: https://servicodados.ibge.gov.br/api/v3/malhas/estados/{code}?intrarregiao=municipio
   Names:    https://servicodados.ibge.gov.br/api/v1/localidades/estados/{uf}/municipios
 
 Usage:
@@ -54,7 +54,7 @@ UF_CODES: dict[str, int] = {
 
 IBGE_MALHAS_URL = (
     "https://servicodados.ibge.gov.br/api/v3/malhas/estados"
-    "/{code}/municipios?formato=application/vnd.geo+json&resolucao=2"
+    "/{code}?formato=application/vnd.geo+json&intrarregiao=municipio&qualidade=intermediaria"
 )
 IBGE_NOMES_URL = (
     "https://servicodados.ibge.gov.br/api/v1/localidades/estados"
@@ -112,7 +112,7 @@ def ingest_uf(uf: str, engine) -> int:
     nomes: dict[str, str] = {str(m["id"]): m["nome"] for m in nomes_data}
     log.info("[%s] %d municipality names loaded.", uf, len(nomes))
 
-    log.info("[%s] Fetching municipality geometry from IBGE malhas API (resolução 2)...", uf)
+    log.info("[%s] Fetching municipality geometry from IBGE malhas API (intrarregiao=municipio)...", uf)
     geojson = fetch_json(IBGE_MALHAS_URL.format(code=code))
 
     features = geojson.get("features", [])
@@ -136,13 +136,13 @@ def ingest_uf(uf: str, engine) -> int:
             "nome": nome,
             "nome_norm": normalize(nome),
             "uf": uf,
-            "geometry": geom,
+            "geom": geom,
         })
 
     if missing_names:
         log.warning("[%s] %d features had no name match — used fallback.", uf, missing_names)
 
-    gdf = gpd.GeoDataFrame(rows, geometry="geometry", crs="EPSG:4674")
+    gdf = gpd.GeoDataFrame(rows, geometry="geom", crs="EPSG:4674")
 
     with engine.begin() as conn:
         deleted = conn.execute(

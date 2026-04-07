@@ -1,7 +1,10 @@
 # ── Stage 1: build ────────────────────────────────────────────────────────────
-FROM node:20-alpine AS builder
+FROM node:20-bookworm-slim AS builder
 
 WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends openssl \
+    && rm -rf /var/lib/apt/lists/*
 
 # Instala dependências (incluindo devDeps para prisma + tsc)
 COPY package*.json ./
@@ -17,9 +20,12 @@ COPY src ./src
 RUN npx tsc
 
 # ── Stage 2: runtime ──────────────────────────────────────────────────────────
-FROM node:20-alpine AS runtime
+FROM node:20-bookworm-slim AS runtime
 
 WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends openssl \
+    && rm -rf /var/lib/apt/lists/*
 
 # Apenas dependências de produção
 COPY package*.json ./

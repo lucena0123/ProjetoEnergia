@@ -140,7 +140,7 @@ def generate_rede_mt(municipios_gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
             else MT_SEGS_PEQUENO
         )
         for i in range(n_segs):
-            line = random_line_in_polygon(row.geometry)
+            line = random_line_in_polygon(row["geom"])
             rows.append({
                 "cod_id": f"MT-DEMO-{row['codigo_ibge']}-{i:03d}",
                 "distribuidora": DISTRIBUIDORA,
@@ -150,9 +150,9 @@ def generate_rede_mt(municipios_gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
                 "condutor": random.choice(CONDUTORES),
                 "comprimento": round(seg_length_m(line), 1),
                 "data_implant": random_date_past(35),
-                "geometry": line,
+                "geom": line,
             })
-    gdf = gpd.GeoDataFrame(rows, geometry="geometry", crs="EPSG:4674")
+    gdf = gpd.GeoDataFrame(rows, geometry="geom", crs="EPSG:4674")
     log.info("  %d segmentos MT gerados para %d municípios.",
              len(gdf), len(municipios_gdf))
     return gdf
@@ -172,7 +172,7 @@ def generate_transformadores(municipios_gdf: gpd.GeoDataFrame) -> gpd.GeoDataFra
             (MT_SEGS_GRANDE if row["nome"] in GRANDES_AL else MT_SEGS_MEDIO) / 2
         ))
         for i in range(n_trans):
-            pt = random_point_in_polygon(row.geometry)
+            pt = random_point_in_polygon(row["geom"])
             rows.append({
                 "cod_id": f"TR-DEMO-{row['codigo_ibge']}-{i:03d}",
                 "distribuidora": DISTRIBUIDORA,
@@ -180,9 +180,9 @@ def generate_transformadores(municipios_gdf: gpd.GeoDataFrame) -> gpd.GeoDataFra
                 "potencia_nom": random.choice(potencias),
                 "fabricante": random.choice(FABRICANTES),
                 "data_implant": random_date_past(30),
-                "geometry": pt,
+                "geom": pt,
             })
-    gdf = gpd.GeoDataFrame(rows, geometry="geometry", crs="EPSG:4674")
+    gdf = gpd.GeoDataFrame(rows, geometry="geom", crs="EPSG:4674")
     log.info("  %d transformadores gerados.", len(gdf))
     return gdf
 
@@ -252,11 +252,31 @@ def generate_dec_fec(municipios_gdf: gpd.GeoDataFrame) -> pd.DataFrame:
 def clear_existing(engine, uf: str) -> None:
     log.info("Removendo dados existentes para UF=%s...", uf)
     with engine.begin() as conn:
-        for table in ["mapa_risco", "indicadores_continuidade",
-                      "transformadores", "rede_mt"]:
-            deleted = conn.execute(
-                text(f"DELETE FROM {table} WHERE uf = :uf"), {"uf": uf}
-            ).rowcount
+        deletions = [
+            ("mapa_risco", text("DELETE FROM mapa_risco WHERE uf = :uf"), {"uf": uf}),
+            (
+                "indicadores_continuidade",
+                text("DELETE FROM indicadores_continuidade WHERE uf = :uf"),
+                {"uf": uf},
+            ),
+            ("rede_mt", text("DELETE FROM rede_mt WHERE uf = :uf"), {"uf": uf}),
+            (
+                "transformadores",
+                text(
+                    """
+                    DELETE FROM transformadores
+                    WHERE distribuidora = :dist
+                      AND municipio IN (
+                        SELECT nome FROM ibge_municipios WHERE uf = :uf
+                      )
+                    """
+                ),
+                {"dist": DISTRIBUIDORA, "uf": uf},
+            ),
+        ]
+
+        for table, statement, params in deletions:
+            deleted = conn.execute(statement, params).rowcount
             if deleted:
                 log.info("  %s: %d linhas removidas.", table, deleted)
 

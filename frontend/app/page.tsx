@@ -6,9 +6,15 @@ import Link from 'next/link'
 import KpiCard from '@/components/KpiCard'
 import PainelRisco from '@/components/PainelRisco'
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
+const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001'
 
-const fetcher = (url: string) => fetch(url).then((r) => r.json())
+const fetcher = async (url: string) => {
+  const response = await fetch(url)
+  if (!response.ok) {
+    throw new Error(`Request failed: ${response.status}`)
+  }
+  return response.json()
+}
 
 interface KpisData {
   score_medio: number
@@ -31,7 +37,8 @@ interface RankingResponse {
   data: MunicipioRisco[]
   total: number
   page: number
-  page_size: number
+  limit: number
+  pages: number
 }
 
 export default function HomePage() {
@@ -44,7 +51,7 @@ export default function HomePage() {
     fetcher
   )
 
-  const rankingParams = new URLSearchParams({ page: String(page), page_size: '20' })
+  const rankingParams = new URLSearchParams({ page: String(page), limit: '20' })
   if (distribuidora) rankingParams.set('distribuidora', distribuidora)
   if (uf) rankingParams.set('uf', uf.toUpperCase())
 

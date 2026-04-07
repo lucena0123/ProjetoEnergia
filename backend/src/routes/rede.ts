@@ -57,8 +57,8 @@ const transformadoresSchema = {
 // ---------------------------------------------------------------------------
 
 /** Builds a GeoJSON FeatureCollection from rows that contain a `geometry` field. */
-function toFeatureCollection(
-  rows: Array<Record<string, unknown>>,
+function toFeatureCollection<T extends { geometry: object | null }>(
+  rows: T[],
 ): object {
   const features = rows.map((row) => {
     const { geometry, ...properties } = row
@@ -114,7 +114,7 @@ export const redeRoutes: FastifyPluginAsync = async (fastify: FastifyInstance) =
       `
 
       const result = await pgPool.query<TrechoRow>(sql, [scoreMin, limit])
-      return reply.send(toFeatureCollection(result.rows as Array<Record<string, unknown>>))
+      return reply.send(toFeatureCollection(result.rows))
     },
   )
 
@@ -159,7 +159,7 @@ export const redeRoutes: FastifyPluginAsync = async (fastify: FastifyInstance) =
         return reply.send({ type: 'FeatureCollection', features: [] })
       }
 
-      return reply.send(toFeatureCollection(result.rows as Array<Record<string, unknown>>))
+      return reply.send(toFeatureCollection(result.rows))
     },
   )
 }

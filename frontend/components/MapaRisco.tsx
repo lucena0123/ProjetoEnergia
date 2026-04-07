@@ -5,8 +5,9 @@ import mapboxgl from 'mapbox-gl'
 import 'mapbox-gl/dist/mapbox-gl.css'
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001'
+const MAPBOX_TOKEN = process.env.NEXT_PUBLIC_MAPBOX_TOKEN || ''
 
-mapboxgl.accessToken = process.env.NEXT_PUBLIC_MAPBOX_TOKEN || ''
+mapboxgl.accessToken = MAPBOX_TOKEN
 
 interface MunicipioProps {
   municipio: string
@@ -50,6 +51,7 @@ export default function MapaRisco() {
   const [hint, setHint] = useState<string | null>(null)
   const [ranking, setRanking] = useState<RankingItem[]>([])
   const [rankingLoading, setRankingLoading] = useState(true)
+  const mapEnabled = Boolean(MAPBOX_TOKEN)
 
   // ── Sidebar ranking ────────────────────────────────────────────────────────
   useEffect(() => {
@@ -62,6 +64,7 @@ export default function MapaRisco() {
 
   // ── Map init ───────────────────────────────────────────────────────────────
   useEffect(() => {
+    if (!mapEnabled) return
     if (map.current || !mapContainer.current) return
 
     map.current = new mapboxgl.Map({
@@ -204,7 +207,7 @@ export default function MapaRisco() {
       map.current?.remove()
       map.current = null
     }
-  }, [])
+  }, [mapEnabled])
 
   // ── Rede MT toggle ─────────────────────────────────────────────────────────
   const toggleRedeMt = useCallback(async () => {
@@ -305,6 +308,22 @@ export default function MapaRisco() {
   return (
     <div className="relative w-full h-screen">
       <div ref={mapContainer} className="w-full h-full" />
+
+      {!mapEnabled && (
+        <div className="absolute inset-0 flex items-center justify-center bg-gray-950">
+          <div className="max-w-md rounded-xl border border-amber-700 bg-amber-950/80 px-6 py-5 text-center shadow-2xl">
+            <h2 className="text-sm font-semibold uppercase tracking-[0.2em] text-amber-300">
+              Mapa indisponivel
+            </h2>
+            <p className="mt-3 text-sm leading-6 text-amber-100">
+              Configure `MAPBOX_TOKEN` no arquivo `.env` e recrie o frontend para habilitar o mapa.
+            </p>
+            <p className="mt-2 text-xs text-amber-200/80">
+              O dashboard e a API continuam funcionando normalmente em `http://localhost:3000`.
+            </p>
+          </div>
+        </div>
+      )}
 
       {/* Hint toast */}
       {hint && (
