@@ -84,12 +84,12 @@ services:
       context: ./frontend
       dockerfile: Dockerfile
       args:
-        NEXT_PUBLIC_MAPBOX_TOKEN: ${MAPBOX_TOKEN}
+        NEXT_PUBLIC_MAP_STYLE_URL: ${NEXT_PUBLIC_MAP_STYLE_URL:-https://tiles.openfreemap.org/styles/liberty}
         NEXT_PUBLIC_API_URL: http://localhost:3001
     ports:
       - "3000:3000"
     environment:
-      NEXT_PUBLIC_MAPBOX_TOKEN: ${MAPBOX_TOKEN}
+      NEXT_PUBLIC_MAP_STYLE_URL: ${NEXT_PUBLIC_MAP_STYLE_URL:-https://tiles.openfreemap.org/styles/liberty}
       NEXT_PUBLIC_API_URL: http://localhost:3001
     depends_on:
       - backend

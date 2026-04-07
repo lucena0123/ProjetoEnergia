@@ -1,13 +1,12 @@
 'use client'
 
 import { useEffect, useRef, useState, useCallback } from 'react'
-import mapboxgl from 'mapbox-gl'
-import 'mapbox-gl/dist/mapbox-gl.css'
+import maplibregl from 'maplibre-gl'
+import 'maplibre-gl/dist/maplibre-gl.css'
+
+import { MAP_PROVIDER_CONFIG } from '@/lib/mapProvider'
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001'
-const MAPBOX_TOKEN = process.env.NEXT_PUBLIC_MAPBOX_TOKEN || ''
-
-mapboxgl.accessToken = MAPBOX_TOKEN
 
 interface MunicipioProps {
   municipio: string
@@ -34,24 +33,24 @@ function scoreClass(score: number | null): string {
   return 'text-green-400 font-bold'
 }
 
-function removeLayer(m: mapboxgl.Map, id: string) {
+function removeLayer(m: maplibregl.Map, id: string) {
   if (m.getLayer(id)) m.removeLayer(id)
   if (m.getSource(id)) m.removeSource(id)
 }
 
 export default function MapaRisco() {
   const mapContainer = useRef<HTMLDivElement | null>(null)
-  const map = useRef<mapboxgl.Map | null>(null)
-  const popupRef = useRef<mapboxgl.Popup | null>(null)
+  const map = useRef<maplibregl.Map | null>(null)
+  const popupRef = useRef<maplibregl.Popup | null>(null)
 
   const [mapLoaded, setMapLoaded] = useState(false)
+  const [mapError, setMapError] = useState<string | null>(null)
   const [redeMtActive, setRedeMtActive] = useState(false)
   const [transActive, setTransActive] = useState(false)
   const [selectedMunicipio, setSelectedMunicipio] = useState<MunicipioProps | null>(null)
   const [hint, setHint] = useState<string | null>(null)
   const [ranking, setRanking] = useState<RankingItem[]>([])
   const [rankingLoading, setRankingLoading] = useState(true)
-  const mapEnabled = Boolean(MAPBOX_TOKEN)
 
   // ── Sidebar ranking ────────────────────────────────────────────────────────
   useEffect(() => {
@@ -64,27 +63,40 @@ export default function MapaRisco() {
 
   // ── Map init ───────────────────────────────────────────────────────────────
   useEffect(() => {
-    if (!mapEnabled) return
     if (map.current || !mapContainer.current) return
 
-    map.current = new mapboxgl.Map({
+    let mapDidLoad = false
+    const mapInstance = new maplibregl.Map({
       container: mapContainer.current,
-      style: 'mapbox://styles/mapbox/dark-v11',
-      center: [-35.7, -9.6],
-      zoom: 8,
+      style: MAP_PROVIDER_CONFIG.styleUrl,
+      center: MAP_PROVIDER_CONFIG.initialView.center,
+      zoom: MAP_PROVIDER_CONFIG.initialView.zoom,
       attributionControl: false,
     })
+    map.current = mapInstance
 
-    map.current.addControl(new mapboxgl.NavigationControl(), 'top-left')
-    map.current.addControl(new mapboxgl.AttributionControl({ compact: true }), 'bottom-left')
+    mapInstance.addControl(new maplibregl.NavigationControl(), 'top-left')
+    mapInstance.addControl(new maplibregl.AttributionControl({ compact: true }), 'bottom-left')
 
-    map.current.on('load', () => {
+    const handleMapError = (event: { error?: Error }) => {
+      const err = event.error ?? new Error('Failed to load the configured basemap style.')
+      console.error('[MapaRisco] basemap load failed:', err)
+
+      if (!mapDidLoad) {
+        setMapLoaded(false)
+        setMapError(MAP_PROVIDER_CONFIG.fallback.description)
+      }
+    }
+
+    const handleMapLoad = () => {
+      mapDidLoad = true
       setMapLoaded(true)
+      setMapError(null)
 
       fetch(`${API_URL}/api/mapa-risco`)
         .then((r) => r.json())
         .then((geojson: GeoJSON.FeatureCollection) => {
-          if (!map.current) return
+          if (!mapInstance) return
 
           const valid: GeoJSON.FeatureCollection = {
             type: 'FeatureCollection',
@@ -93,16 +105,16 @@ export default function MapaRisco() {
 
           if (valid.features.length === 0) return
 
-          map.current.addSource('municipios-risco', { type: 'geojson', data: valid })
+          mapInstance.addSource('municipios-risco', { type: 'geojson', data: valid })
 
-          map.current.addLayer({
+          mapInstance.addLayer({
             id: 'municipios-fill',
             type: 'fill',
             source: 'municipios-risco',
             paint: {
               'fill-color': [
                 'interpolate', ['linear'],
-                ['coalesce', ['get', 'score_risco'], 0],
+                ['to-number', ['coalesce', ['get', 'score_risco'], 0]],
                 0,   '#00ff00',
                 50,  '#ffff00',
                 80,  '#ff4400',
@@ -112,7 +124,7 @@ export default function MapaRisco() {
             },
           })
 
-          map.current.addLayer({
+          mapInstance.addLayer({
             id: 'municipios-border',
             type: 'line',
             source: 'municipios-risco',
@@ -120,7 +132,7 @@ export default function MapaRisco() {
           })
 
           // Highlight layer (selected municipality)
-          map.current.addLayer({
+          mapInstance.addLayer({
             id: 'municipios-selected',
             type: 'line',
             source: 'municipios-risco',
@@ -140,20 +152,20 @@ export default function MapaRisco() {
           if (coords.length > 0) {
             const lngs = coords.map((c) => c[0])
             const lats = coords.map((c) => c[1])
-            map.current.fitBounds(
+            mapInstance.fitBounds(
               [[Math.min(...lngs), Math.min(...lats)], [Math.max(...lngs), Math.max(...lats)]],
               { padding: 40, duration: 800 },
             )
           }
 
           // ── Click handler ────────────────────────────────────────────────
-          map.current.on('click', 'municipios-fill', (e) => {
-            if (!e.features?.length || !map.current) return
+          mapInstance.on('click', 'municipios-fill', (e) => {
+            if (!e.features?.length) return
             const props = e.features[0].properties as MunicipioProps
             setSelectedMunicipio(props)
 
             // Update highlight filter
-            map.current.setFilter('municipios-selected', ['==', ['get', 'municipio'], props.municipio])
+            mapInstance.setFilter('municipios-selected', ['==', ['get', 'municipio'], props.municipio])
 
             if (popupRef.current) popupRef.current.remove()
             const score = props.score_risco
@@ -164,7 +176,7 @@ export default function MapaRisco() {
               : score >= 40 ? '#facc15'
               : '#4ade80'
 
-            popupRef.current = new mapboxgl.Popup({ closeButton: true, className: 'gridrisk-popup' })
+            popupRef.current = new maplibregl.Popup({ closeButton: true, className: 'gridrisk-popup' })
               .setLngLat(e.lngLat)
               .setHTML(`
                 <div style="font-family:system-ui,sans-serif;min-width:200px">
@@ -189,25 +201,31 @@ export default function MapaRisco() {
                     </tr>
                   </table>
                 </div>`)
-              .addTo(map.current)
+              .addTo(mapInstance)
           })
 
-          map.current.on('mouseenter', 'municipios-fill', () => {
-            if (map.current) map.current.getCanvas().style.cursor = 'pointer'
+          mapInstance.on('mouseenter', 'municipios-fill', () => {
+            mapInstance.getCanvas().style.cursor = 'pointer'
           })
-          map.current.on('mouseleave', 'municipios-fill', () => {
-            if (map.current) map.current.getCanvas().style.cursor = ''
+          mapInstance.on('mouseleave', 'municipios-fill', () => {
+            mapInstance.getCanvas().style.cursor = ''
           })
         })
         .catch((err) => console.error('[MapaRisco] mapa-risco load failed:', err))
-    })
+    }
+
+    mapInstance.on('error', handleMapError)
+    mapInstance.on('load', handleMapLoad)
 
     return () => {
+      mapDidLoad = false
       popupRef.current?.remove()
-      map.current?.remove()
+      mapInstance.off('error', handleMapError)
+      mapInstance.off('load', handleMapLoad)
+      mapInstance.remove()
       map.current = null
     }
-  }, [mapEnabled])
+  }, [])
 
   // ── Rede MT toggle ─────────────────────────────────────────────────────────
   const toggleRedeMt = useCallback(async () => {
@@ -228,7 +246,7 @@ export default function MapaRisco() {
         source: 'rede_mt-layer',
         paint: {
           'line-color': [
-            'interpolate', ['linear'], ['coalesce', ['get', 'score_risco'], 0],
+            'interpolate', ['linear'], ['to-number', ['coalesce', ['get', 'score_risco'], 0]],
             0, '#60a5fa', 70, '#f97316', 100, '#ef4444',
           ],
           'line-width': 1.5,
@@ -266,7 +284,7 @@ export default function MapaRisco() {
 
       if (map.current.getSource('transformadores-layer')) {
         // Refresh data for new municipality
-        const src = map.current.getSource('transformadores-layer') as mapboxgl.GeoJSONSource
+        const src = map.current.getSource('transformadores-layer') as maplibregl.GeoJSONSource
         src.setData(geojson)
       } else {
         map.current.addSource('transformadores-layer', { type: 'geojson', data: geojson })
@@ -277,7 +295,7 @@ export default function MapaRisco() {
           paint: {
             'circle-radius': 4,
             'circle-color': [
-              'interpolate', ['linear'], ['coalesce', ['get', 'score_risco'], 0],
+              'interpolate', ['linear'], ['to-number', ['coalesce', ['get', 'score_risco'], 0]],
               0, '#34d399', 70, '#fb923c', 100, '#ef4444',
             ],
             'circle-stroke-width': 1,
@@ -299,7 +317,7 @@ export default function MapaRisco() {
     fetch(`${API_URL}/api/transformadores-criticos?municipio=${encodeURIComponent(selectedMunicipio.municipio)}`)
       .then((r) => r.json())
       .then((geojson: GeoJSON.FeatureCollection) => {
-        const src = map.current?.getSource('transformadores-layer') as mapboxgl.GeoJSONSource | undefined
+        const src = map.current?.getSource('transformadores-layer') as maplibregl.GeoJSONSource | undefined
         src?.setData(geojson)
       })
       .catch(console.error)
@@ -309,17 +327,20 @@ export default function MapaRisco() {
     <div className="relative w-full h-screen">
       <div ref={mapContainer} className="w-full h-full" />
 
-      {!mapEnabled && (
+      {mapError && (
         <div className="absolute inset-0 flex items-center justify-center bg-gray-950">
           <div className="max-w-md rounded-xl border border-amber-700 bg-amber-950/80 px-6 py-5 text-center shadow-2xl">
             <h2 className="text-sm font-semibold uppercase tracking-[0.2em] text-amber-300">
-              Mapa indisponivel
+              {MAP_PROVIDER_CONFIG.fallback.title}
             </h2>
             <p className="mt-3 text-sm leading-6 text-amber-100">
-              Configure `MAPBOX_TOKEN` no arquivo `.env` e recrie o frontend para habilitar o mapa.
+              {mapError}
             </p>
             <p className="mt-2 text-xs text-amber-200/80">
-              O dashboard e a API continuam funcionando normalmente em `http://localhost:3000`.
+              {MAP_PROVIDER_CONFIG.fallback.help}
+            </p>
+            <p className="mt-2 text-xs text-amber-200/60 break-all">
+              Style atual: `{MAP_PROVIDER_CONFIG.styleUrl}`
             </p>
           </div>
         </div>
@@ -416,16 +437,16 @@ export default function MapaRisco() {
       </div>
 
       <style>{`
-        .gridrisk-popup .mapboxgl-popup-content {
+        .gridrisk-popup .maplibregl-popup-content {
           background: #1e293b;
           border: 1px solid #334155;
           border-radius: 8px;
           padding: 12px;
           box-shadow: 0 10px 25px rgba(0,0,0,0.5);
         }
-        .gridrisk-popup .mapboxgl-popup-tip { border-top-color: #1e293b; }
-        .gridrisk-popup .mapboxgl-popup-close-button { color: #94a3b8; font-size: 16px; padding: 4px 8px; }
-        .gridrisk-popup .mapboxgl-popup-close-button:hover { color: #f1f5f9; background: transparent; }
+        .gridrisk-popup .maplibregl-popup-tip { border-top-color: #1e293b; }
+        .gridrisk-popup .maplibregl-popup-close-button { color: #94a3b8; font-size: 16px; padding: 4px 8px; }
+        .gridrisk-popup .maplibregl-popup-close-button:hover { color: #f1f5f9; background: transparent; }
       `}</style>
     </div>
   )

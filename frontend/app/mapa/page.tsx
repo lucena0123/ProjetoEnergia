@@ -3,7 +3,7 @@
 import Link from 'next/link'
 import dynamic from 'next/dynamic'
 
-// Dynamic import to avoid SSR issues with mapbox-gl
+// Dynamic import to avoid SSR issues with the map runtime
 const MapaRisco = dynamic(() => import('@/components/MapaRisco'), {
   ssr: false,
   loading: () => (

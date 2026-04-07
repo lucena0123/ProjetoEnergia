@@ -45,7 +45,7 @@ score = (ratio_dec / 3.0) × 40
 │   Python 3.11   │   Fastify + TypeScript      │    Next.js 14         │
 │                 │                             │                       │
 │ ingest_ibge     │  GET /api/mapa-risco        │  /mapa                │
-│ ingest_bdgd     │  GET /api/trechos-criticos  │  ↳ MapboxGL choropleth│
+│ ingest_bdgd     │  GET /api/trechos-criticos  │  ↳ MapLibre choropleth│
 │ ingest_dec_fec  │  GET /api/transformadores   │  ↳ Toggle rede MT     │
 │ calculate_risk  │  GET /api/ranking-municipios│  ↳ Popup por município│
 │ seed_demo       │  GET /api/kpis              │                       │
@@ -70,7 +70,7 @@ score = (ratio_dec / 3.0) × 40
 | Filas assíncronas | BullMQ 5 + Redis 7 |
 | Pipeline de dados | Python 3.11 · GeoPandas · SQLAlchemy |
 | Frontend | Next.js 14 (App Router) · Tailwind CSS |
-| Mapa | MapboxGL JS v3 |
+| Mapa | MapLibre GL JS + OpenFreeMap |
 | Infra local | Docker Compose |
 | Deploy | Vercel (frontend) + Railway (backend + banco) |
 
@@ -90,7 +90,6 @@ score = (ratio_dec / 3.0) × 40
 
 - [Docker](https://docs.docker.com/get-docker/) e Docker Compose
 - [Make](https://www.gnu.org/software/make/)
-- Token gratuito do [Mapbox](https://account.mapbox.com/auth/signup/)
 
 ---
 
@@ -101,7 +100,7 @@ score = (ratio_dec / 3.0) × 40
 git clone https://github.com/lucena0123/ProjetoEnergia.git
 cd ProjetoEnergia
 cp .env.example .env
-# Edite .env e adicione seu MAPBOX_TOKEN
+# Opcional: troque NEXT_PUBLIC_MAP_STYLE_URL se quiser usar outro style
 
 # 2. Sobe a stack
 make setup
@@ -161,8 +160,8 @@ cd frontend
 npx vercel
 
 # Configurar variáveis de ambiente no painel Vercel:
-# NEXT_PUBLIC_MAPBOX_TOKEN = pk.xxx
 # NEXT_PUBLIC_API_URL      = https://seu-backend.railway.app
+# NEXT_PUBLIC_MAP_STYLE_URL = https://tiles.openfreemap.org/styles/liberty  # opcional
 ```
 
 ### Backend + Banco + Redis → Railway
@@ -256,7 +255,7 @@ gridrisk/
 │   │   ├── page.tsx            Dashboard com KPIs
 │   │   └── mapa/page.tsx       Mapa interativo
 │   └── components/
-│       ├── MapaRisco.tsx       MapboxGL choropleth
+│       ├── MapaRisco.tsx       MapLibre choropleth
 │       ├── PainelRisco.tsx     Tabela paginada
 │       └── KpiCard.tsx
 └── docker-compose.yml
