@@ -2,11 +2,11 @@
 """
 seed_demo.py — GridRisk: dados de demonstração automáticos
 
-Popula o banco com dados realistas para Alagoas (AL) sem precisar baixar
+Popula o banco com dados realistas para uma UF brasileira sem precisar baixar
 arquivos BDGD manualmente. Execução completa em ~3 minutos.
 
 O que este script faz:
-  1. Carrega polígonos municipais de AL via API pública do IBGE
+  1. Carrega polígonos municipais da UF via API pública do IBGE
   2. Gera segmentos de rede MT sintéticos dentro de cada município
   3. Gera transformadores sintéticos
   4. Gera indicadores DEC/FEC com distribuição realista (2022-2023)
@@ -58,20 +58,21 @@ random.seed(42)  # reprodutível
 # ---------------------------------------------------------------------------
 # Parâmetros de geração
 # ---------------------------------------------------------------------------
-DISTRIBUIDORA = "Equatorial Alagoas"
 CONDUTORES = ["XLPE 95mm²", "XLPE 70mm²", "AAC 95mm²", "ACSR 4/0", "NU 2AWG"]
 FABRICANTES = ["ABB", "Trafo", "WEG", "Siemens", "Romagnole"]
-TENSAO_MT = 13.8   # kV — padrão Equatorial AL
+TENSAO_MT = 13.8   # kV — valor padrão para a demo
 
 # Segmentos MT por município (proporcional à população estimada)
 MT_SEGS_PEQUENO   = 8    # < 20k hab
 MT_SEGS_MEDIO     = 20   # 20k–100k hab
 MT_SEGS_GRANDE    = 50   # > 100k hab (Maceió, Arapiraca, etc.)
 
-# Municípios "grandes" de AL para forçar mais segmentos
-GRANDES_AL = {"Maceió", "Arapiraca", "Palmeira dos Índios", "Rio Largo",
-              "União dos Palmares", "Penedo", "São Miguel dos Campos",
-              "Delmiro Gouveia", "Coruripe", "Marechal Deodoro"}
+# Distribuidoras usadas na demo por UF. Quando a UF não estiver mapeada,
+# usamos um nome neutro para evitar rótulos incorretos.
+DISTRIBUIDORA_BY_UF = {
+    "AL": "Equatorial Alagoas",
+    "CE": "Enel Ceará",
+}
 
 # Meses de dados DEC/FEC: jan/2022 – dez/2023
 DATA_INICIO = date(2022, 1, 1)
@@ -124,26 +125,49 @@ def random_date_past(max_years: int = 35) -> date:
     return (datetime.now() - timedelta(days=days)).date()
 
 
+def resolve_distribuidora(uf: str) -> str:
+    return DISTRIBUIDORA_BY_UF.get(uf.upper(), f"Distribuidora Demo {uf.upper()}")
+
+
+def select_large_municipios(municipios_gdf: gpd.GeoDataFrame) -> set[str]:
+    """Seleciona municípios maiores por área para densificar a rede sintética."""
+    if municipios_gdf.empty:
+        return set()
+
+    projected = municipios_gdf.to_crs(3857)
+    ranked = (
+        municipios_gdf[["nome", "geom"]]
+        .assign(area=projected.geometry.area)
+        .sort_values("area", ascending=False)
+    )
+    top_n = min(max(5, math.ceil(len(ranked) * 0.1)), len(ranked))
+    return set(ranked.head(top_n)["nome"].tolist())
+
+
 # ---------------------------------------------------------------------------
 # Geração de rede MT
 # ---------------------------------------------------------------------------
 
-def generate_rede_mt(municipios_gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+def generate_rede_mt(
+    municipios_gdf: gpd.GeoDataFrame,
+    distribuidora: str,
+    large_municipios: set[str],
+) -> gpd.GeoDataFrame:
     """Gera segmentos de rede MT sintéticos para cada município."""
     log.info("Gerando segmentos de rede MT...")
     rows = []
     for _, row in municipios_gdf.iterrows():
         nome = row["nome"]
         n_segs = (
-            MT_SEGS_GRANDE if nome in GRANDES_AL
-            else MT_SEGS_MEDIO if nome in {m for m in GRANDES_AL} or random.random() < 0.15
+            MT_SEGS_GRANDE if nome in large_municipios
+            else MT_SEGS_MEDIO if random.random() < 0.15
             else MT_SEGS_PEQUENO
         )
         for i in range(n_segs):
             line = random_line_in_polygon(row["geom"])
             rows.append({
                 "cod_id": f"MT-DEMO-{row['codigo_ibge']}-{i:03d}",
-                "distribuidora": DISTRIBUIDORA,
+                "distribuidora": distribuidora,
                 "municipio": nome,
                 "uf": row["uf"],
                 "tensao_nom": TENSAO_MT,
@@ -162,20 +186,24 @@ def generate_rede_mt(municipios_gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
 # Geração de transformadores
 # ---------------------------------------------------------------------------
 
-def generate_transformadores(municipios_gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+def generate_transformadores(
+    municipios_gdf: gpd.GeoDataFrame,
+    distribuidora: str,
+    large_municipios: set[str],
+) -> gpd.GeoDataFrame:
     """Gera transformadores sintéticos (1 por ~2 segmentos MT)."""
     log.info("Gerando transformadores...")
     rows = []
     potencias = [15.0, 30.0, 45.0, 75.0, 112.5, 150.0, 225.0, 300.0]
     for _, row in municipios_gdf.iterrows():
         n_trans = max(2, int(
-            (MT_SEGS_GRANDE if row["nome"] in GRANDES_AL else MT_SEGS_MEDIO) / 2
+            (MT_SEGS_GRANDE if row["nome"] in large_municipios else MT_SEGS_MEDIO) / 2
         ))
         for i in range(n_trans):
             pt = random_point_in_polygon(row["geom"])
             rows.append({
                 "cod_id": f"TR-DEMO-{row['codigo_ibge']}-{i:03d}",
-                "distribuidora": DISTRIBUIDORA,
+                "distribuidora": distribuidora,
                 "municipio": row["nome"],
                 "potencia_nom": random.choice(potencias),
                 "fabricante": random.choice(FABRICANTES),
@@ -191,7 +219,7 @@ def generate_transformadores(municipios_gdf: gpd.GeoDataFrame) -> gpd.GeoDataFra
 # Geração de indicadores DEC/FEC
 # ---------------------------------------------------------------------------
 
-def generate_dec_fec(municipios_gdf: gpd.GeoDataFrame) -> pd.DataFrame:
+def generate_dec_fec(municipios_gdf: gpd.GeoDataFrame, distribuidora: str) -> pd.DataFrame:
     """
     Gera indicadores DEC/FEC mensais com distribuição realista.
 
@@ -228,7 +256,7 @@ def generate_dec_fec(municipios_gdf: gpd.GeoDataFrame) -> pd.DataFrame:
             # Sazonalidade: pior no verão (dez-mar) por chuvas
             season = 1.0 + 0.3 * math.sin(2 * math.pi * (mes_date.month - 1) / 12)
             rows.append({
-                "distribuidora": DISTRIBUIDORA,
+                "distribuidora": distribuidora,
                 "municipio": nome,
                 "uf": uf,
                 "ano": mes_date.year,
@@ -249,7 +277,7 @@ def generate_dec_fec(municipios_gdf: gpd.GeoDataFrame) -> pd.DataFrame:
 # Inserção no banco
 # ---------------------------------------------------------------------------
 
-def clear_existing(engine, uf: str) -> None:
+def clear_existing(engine, uf: str, distribuidora: str) -> None:
     log.info("Removendo dados existentes para UF=%s...", uf)
     with engine.begin() as conn:
         deletions = [
@@ -271,7 +299,7 @@ def clear_existing(engine, uf: str) -> None:
                       )
                     """
                 ),
-                {"dist": DISTRIBUIDORA, "uf": uf},
+                {"dist": distribuidora, "uf": uf},
             ),
         ]
 
@@ -300,19 +328,19 @@ def insert_transformadores(gdf: gpd.GeoDataFrame, engine) -> None:
     log.info("  %d transformadores inseridos.", len(gdf))
 
 
-def insert_dec_fec(df: pd.DataFrame, engine) -> None:
+def insert_dec_fec(df: pd.DataFrame, engine, distribuidora: str) -> None:
     log.info("Inserindo indicadores DEC/FEC no banco...")
     # Remove duplicatas
     with engine.begin() as conn:
         conn.execute(
             text("DELETE FROM indicadores_continuidade WHERE distribuidora = :d"),
-            {"d": DISTRIBUIDORA},
+            {"d": distribuidora},
         )
     df.to_sql("indicadores_continuidade", engine, if_exists="append", index=False, chunksize=2000)
     log.info("  %d registros inseridos.", len(df))
 
 
-def run_calculate_risk(engine) -> None:
+def run_calculate_risk(engine, distribuidora: str) -> None:
     """Executa o SQL de scoring diretamente (sem chamar o script externo)."""
     log.info("Calculando scores de risco...")
     sql = """
@@ -371,12 +399,12 @@ def run_calculate_risk(engine) -> None:
         for statement in sql.strip().split(";"):
             stmt = statement.strip()
             if stmt:
-                conn.execute(text(stmt), {"dist": DISTRIBUIDORA})
+                conn.execute(text(stmt), {"dist": distribuidora})
 
     with engine.connect() as conn:
         total = conn.execute(
             text("SELECT COUNT(*) FROM mapa_risco WHERE distribuidora = :d"),
-            {"d": DISTRIBUIDORA},
+            {"d": distribuidora},
         ).scalar()
         top5 = conn.execute(
             text("""
@@ -384,7 +412,7 @@ def run_calculate_risk(engine) -> None:
                 FROM mapa_risco WHERE distribuidora = :d
                 ORDER BY score_risco DESC LIMIT 5
             """),
-            {"d": DISTRIBUIDORA},
+            {"d": distribuidora},
         ).fetchall()
 
     log.info("  %d municípios com score calculado.", total)
@@ -414,11 +442,13 @@ def main(uf: str, limpar: bool, db_url: Optional[str]) -> None:
         sys.exit(1)
 
     uf = uf.upper()
+    distribuidora = resolve_distribuidora(uf)
     engine = create_engine(db_url, pool_pre_ping=True)
     started = datetime.now()
 
     log.info("=" * 60)
     log.info("GridRisk — Seed de demonstração para UF=%s", uf)
+    log.info("Distribuidora da demo: %s", distribuidora)
     log.info("=" * 60)
 
     # ── 1. IBGE boundaries ────────────────────────────────────────────────────
@@ -432,28 +462,29 @@ def main(uf: str, limpar: bool, db_url: Optional[str]) -> None:
         geom_col="geom",
     )
     log.info("  %d municípios carregados.", len(municipios_gdf))
+    large_municipios = select_large_municipios(municipios_gdf)
 
     if limpar:
-        clear_existing(engine, uf)
+        clear_existing(engine, uf, distribuidora)
 
     # ── 2. Rede MT ────────────────────────────────────────────────────────────
     log.info("[2/5] Gerando rede MT sintética...")
-    rede_gdf = generate_rede_mt(municipios_gdf)
+    rede_gdf = generate_rede_mt(municipios_gdf, distribuidora, large_municipios)
     insert_rede_mt(rede_gdf, engine)
 
     # ── 3. Transformadores ────────────────────────────────────────────────────
     log.info("[3/5] Gerando transformadores sintéticos...")
-    trans_gdf = generate_transformadores(municipios_gdf)
+    trans_gdf = generate_transformadores(municipios_gdf, distribuidora, large_municipios)
     insert_transformadores(trans_gdf, engine)
 
     # ── 4. DEC/FEC ────────────────────────────────────────────────────────────
     log.info("[4/5] Gerando indicadores DEC/FEC...")
-    dec_df = generate_dec_fec(municipios_gdf)
-    insert_dec_fec(dec_df, engine)
+    dec_df = generate_dec_fec(municipios_gdf, distribuidora)
+    insert_dec_fec(dec_df, engine, distribuidora)
 
     # ── 5. Score de risco ─────────────────────────────────────────────────────
     log.info("[5/5] Calculando scores de risco...")
-    run_calculate_risk(engine)
+    run_calculate_risk(engine, distribuidora)
 
     elapsed = (datetime.now() - started).total_seconds()
     log.info("=" * 60)
