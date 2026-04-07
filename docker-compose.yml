@@ -43,9 +43,43 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    command: ["node", "dist/worker.js"]
+    environment:
+      DATABASE_URL: postgresql://griduser:gridpass@postgres:5432/gridrisk
+      REDIS_URL: redis://redis:6379
+      PYTHON_BIN: python3
+      BDGD_DATA_DIR: /data
+      WORKER_CONCURRENCY: 2
     volumes:
-      - ./backend:/app
-      - /app/node_modules
+      - bdgd_data:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  pipeline:
+    build:
+      context: ./pipeline
+      dockerfile: Dockerfile
+    environment:
+      DATABASE_URL: postgresql://griduser:gridpass@postgres:5432/gridrisk
+    volumes:
+      - bdgd_data:/data
+      - ./pipeline:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # Keeps container alive for exec-based usage:
+    #   docker compose exec pipeline python ingest_bdgd.py --arquivo /data/bdgd.gpkg ...
+    command: ["tail", "-f", "/dev/null"]
 
   frontend:
     build:
@@ -58,6 +92,8 @@ services:
       NEXT_PUBLIC_API_URL: http://localhost:3001
     depends_on:
       - backend
+    restart: unless-stopped
 
 volumes:
   pgdata:
+  bdgd_data:
