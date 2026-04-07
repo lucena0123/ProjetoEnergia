@@ -39,6 +39,30 @@ function removeLayer(m: mapboxgl.Map, id: string) {
   if (m.getSource(id)) m.removeSource(id)
 }
 
+/** Generate an inline SVG sparkline string for use inside Mapbox popup HTML */
+function sparklineSvg(data: number[], width = 120, height = 28): string {
+  if (!data || data.length === 0) return ''
+  const min = Math.min(...data, 0)
+  const max = Math.max(...data, 100)
+  const range = max - min || 1
+  const padX = 2
+  const padY = 2
+  const innerW = width - padX * 2
+  const innerH = height - padY * 2
+  const lastVal = data[data.length - 1]
+  const color = lastVal >= 80 ? '#f87171' : lastVal >= 60 ? '#fb923c' : lastVal >= 40 ? '#facc15' : '#4ade80'
+  const points = data
+    .map((v, i) => {
+      const x = padX + (i / Math.max(data.length - 1, 1)) * innerW
+      const y = padY + innerH - ((v - min) / range) * innerH
+      return `${x.toFixed(1)},${y.toFixed(1)}`
+    })
+    .join(' ')
+  return `<svg width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" style="display:block">
+    <polyline points="${points}" fill="none" stroke="${color}" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+  </svg>`
+}
+
 export default function MapaRisco() {
   const mapContainer = useRef<HTMLDivElement | null>(null)
   const map = useRef<mapboxgl.Map | null>(null)
@@ -47,6 +71,7 @@ export default function MapaRisco() {
   const [mapLoaded, setMapLoaded] = useState(false)
   const [redeMtActive, setRedeMtActive] = useState(false)
   const [transActive, setTransActive] = useState(false)
+  const [gapsActive, setGapsActive] = useState(false)
   const [selectedMunicipio, setSelectedMunicipio] = useState<MunicipioProps | null>(null)
   const [hint, setHint] = useState<string | null>(null)
   const [ranking, setRanking] = useState<RankingItem[]>([])
@@ -119,7 +144,6 @@ export default function MapaRisco() {
             paint: { 'line-color': '#ffffff', 'line-width': 0.5, 'line-opacity': 0.35 },
           })
 
-          // Highlight layer (selected municipality)
           map.current.addLayer({
             id: 'municipios-selected',
             type: 'line',
@@ -147,15 +171,15 @@ export default function MapaRisco() {
           }
 
           // ── Click handler ────────────────────────────────────────────────
-          map.current.on('click', 'municipios-fill', (e) => {
+          map.current.on('click', 'municipios-fill', async (e) => {
             if (!e.features?.length || !map.current) return
             const props = e.features[0].properties as MunicipioProps
             setSelectedMunicipio(props)
 
-            // Update highlight filter
             map.current.setFilter('municipios-selected', ['==', ['get', 'municipio'], props.municipio])
 
             if (popupRef.current) popupRef.current.remove()
+
             const score = props.score_risco
             const scoreColor =
               score == null ? '#94a3b8'
@@ -164,32 +188,138 @@ export default function MapaRisco() {
               : score >= 40 ? '#facc15'
               : '#4ade80'
 
-            popupRef.current = new mapboxgl.Popup({ closeButton: true, className: 'gridrisk-popup' })
+            // Show loading popup immediately
+            popupRef.current = new mapboxgl.Popup({
+              closeButton: true,
+              className: 'gridrisk-popup',
+              maxWidth: '340px',
+            })
               .setLngLat(e.lngLat)
               .setHTML(`
-                <div style="font-family:system-ui,sans-serif;min-width:200px">
-                  <div style="font-size:14px;font-weight:700;margin-bottom:6px;color:#f1f5f9">${props.municipio}</div>
-                  <div style="font-size:11px;color:#94a3b8;margin-bottom:10px">${props.distribuidora} — ${props.uf}</div>
-                  <table style="width:100%;border-collapse:collapse;font-size:12px">
-                    <tr>
-                      <td style="padding:3px 0;color:#94a3b8">Score de Risco</td>
-                      <td style="padding:3px 0;text-align:right;font-weight:700;color:${scoreColor}">${score?.toFixed(1) ?? '—'} / 100</td>
-                    </tr>
-                    <tr>
-                      <td style="padding:3px 0;color:#94a3b8">DEC Médio 12m</td>
-                      <td style="padding:3px 0;text-align:right;color:#e2e8f0">${props.dec_medio_12m?.toFixed(2) ?? '—'} h</td>
-                    </tr>
-                    <tr>
-                      <td style="padding:3px 0;color:#94a3b8">Meses c/ Violação</td>
-                      <td style="padding:3px 0;text-align:right;color:#e2e8f0">${props.meses_violacao ?? '—'} / 12</td>
-                    </tr>
-                    <tr>
-                      <td style="padding:3px 0;color:#94a3b8">Idade Média Rede</td>
-                      <td style="padding:3px 0;text-align:right;color:#e2e8f0">${props.idade_media_anos?.toFixed(1) ?? '—'} anos</td>
-                    </tr>
-                  </table>
+                <div style="font-family:system-ui,sans-serif;min-width:280px;padding:2px">
+                  <div style="font-size:13px;font-weight:700;color:#f1f5f9;margin-bottom:2px">
+                    ${props.municipio}
+                  </div>
+                  <div style="font-size:11px;color:#94a3b8;margin-bottom:8px">
+                    ${props.distribuidora} · ${props.uf}
+                  </div>
+                  <div style="text-align:center;padding:16px 0;color:#64748b;font-size:12px">
+                    Carregando detalhes...
+                  </div>
                 </div>`)
               .addTo(map.current)
+
+            // Fetch rich detail
+            try {
+              const res = await fetch(
+                `${API_URL}/api/municipio/${encodeURIComponent(props.municipio)}/detalhe`
+              )
+              if (!res.ok) throw new Error(`${res.status}`)
+              const d = await res.json()
+
+              const tendIcon =
+                d.tendencia === 'piorando' ? '📈' : d.tendencia === 'melhorando' ? '📉' : '➡️'
+              const tendColor =
+                d.tendencia === 'piorando' ? '#f87171' : d.tendencia === 'melhorando' ? '#4ade80' : '#94a3b8'
+
+              const sparkSvg = d.historico?.length
+                ? sparklineSvg(d.historico.map((h: { score_risco: number }) => h.score_risco))
+                : ''
+
+              const formatNum = (n: number | null) =>
+                n == null ? '—' : n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n)
+
+              popupRef.current?.setHTML(`
+                <div style="font-family:system-ui,sans-serif;min-width:280px;padding:2px">
+                  <div style="font-size:13px;font-weight:700;color:#f1f5f9;margin-bottom:2px">
+                    ${d.municipio}
+                  </div>
+                  <div style="font-size:11px;color:#94a3b8;margin-bottom:8px">
+                    ${d.distribuidora} · ${d.uf}
+                  </div>
+
+                  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+                    <span style="font-size:28px;font-weight:900;color:${scoreColor};line-height:1">
+                      ${d.score_risco?.toFixed(0) ?? '—'}<span style="font-size:14px;color:#64748b">/100</span>
+                    </span>
+                    <span style="font-size:11px;color:${tendColor};font-weight:600">
+                      ${tendIcon} ${d.tendencia}
+                    </span>
+                  </div>
+
+                  <div style="background:#1e3a5f;border-radius:6px;padding:7px 9px;margin-bottom:6px">
+                    <div style="font-size:9px;color:#60a5fa;font-weight:700;text-transform:uppercase;margin-bottom:4px;letter-spacing:.05em">DEC/FEC</div>
+                    <div style="font-size:11px;color:#cbd5e1">
+                      DEC: <b style="color:#f1f5f9">${d.dec_medio_12m?.toFixed(1) ?? '—'}h</b>
+                      / limite ${d.dec_limite ?? 12.0}h
+                      (ratio <b style="color:${scoreColor}">${d.ratio_dec?.toFixed(2) ?? '—'}×</b>)
+                    </div>
+                    <div style="font-size:11px;color:#cbd5e1;margin-top:2px">
+                      Violações: <b style="color:#f1f5f9">${d.meses_violacao ?? '—'}</b>/12 meses
+                    </div>
+                  </div>
+
+                  <div style="background:#1e3a5f;border-radius:6px;padding:7px 9px;margin-bottom:6px">
+                    <div style="font-size:9px;color:#60a5fa;font-weight:700;text-transform:uppercase;margin-bottom:4px;letter-spacing:.05em">Infraestrutura</div>
+                    <div style="font-size:11px;color:#cbd5e1">
+                      Rede MT: <b style="color:#f1f5f9">${d.rede?.comprimento_mt_km ?? '—'}km</b>
+                      · BT: <b style="color:#f1f5f9">${d.rede?.comprimento_bt_km ?? '—'}km</b>
+                    </div>
+                    <div style="font-size:11px;color:#cbd5e1;margin-top:2px">
+                      Trafo: <b style="color:#f1f5f9">${d.rede?.n_transformadores ?? '—'}</b> total
+                      · <b style="color:#ef4444">${d.rede?.transformadores_criticos ?? 0}</b> críticos (&gt;25a)
+                    </div>
+                    <div style="font-size:11px;color:#cbd5e1;margin-top:2px">
+                      Potência: <b style="color:#f1f5f9">${d.rede?.potencia_total_kva ? (d.rede.potencia_total_kva / 1000).toFixed(1) + ' MVA' : '—'}</b>
+                    </div>
+                  </div>
+
+                  <div style="background:#1e3a5f;border-radius:6px;padding:7px 9px;margin-bottom:6px">
+                    <div style="font-size:9px;color:#60a5fa;font-weight:700;text-transform:uppercase;margin-bottom:4px;letter-spacing:.05em">Proteção</div>
+                    <div style="font-size:11px;color:#cbd5e1">
+                      Religadores: <b style="color:#f1f5f9">${d.protecao?.n_religadores ?? 0}</b>
+                      · Chaves: <b style="color:#f1f5f9">${d.protecao?.n_chaves ?? 0}</b>
+                    </div>
+                    <div style="font-size:11px;color:#cbd5e1;margin-top:2px">
+                      Cobertura: <b style="color:${(d.protecao?.cobertura_pct ?? 100) < 50 ? '#f87171' : '#4ade80'}">${d.protecao?.cobertura_pct ?? '—'}%</b>
+                      · Exposto: <b style="color:#f1f5f9">${d.protecao?.km_sem_protecao ?? '—'}km</b>
+                    </div>
+                  </div>
+
+                  ${d.social?.populacao ? `
+                  <div style="background:#1e3a5f;border-radius:6px;padding:7px 9px;margin-bottom:6px">
+                    <div style="font-size:9px;color:#60a5fa;font-weight:700;text-transform:uppercase;margin-bottom:4px;letter-spacing:.05em">Contexto</div>
+                    <div style="font-size:11px;color:#cbd5e1">
+                      Pop: <b style="color:#f1f5f9">${formatNum(d.social.populacao)}</b>
+                      · Dom: <b style="color:#f1f5f9">${formatNum(d.social.domicilios)}</b>
+                    </div>
+                    ${d.social.pib_per_capita ? `<div style="font-size:11px;color:#cbd5e1;margin-top:2px">PIB per capita: <b style="color:#f1f5f9">R$&nbsp;${d.social.pib_per_capita.toLocaleString('pt-BR')}</b></div>` : ''}
+                  </div>` : ''}
+
+                  ${sparkSvg ? `
+                  <div style="margin-bottom:8px">
+                    <div style="font-size:9px;color:#64748b;margin-bottom:3px;text-transform:uppercase;letter-spacing:.05em">Histórico de Score</div>
+                    ${sparkSvg}
+                  </div>` : ''}
+
+                  <a href="/municipio/${encodeURIComponent(d.municipio)}"
+                     style="display:block;text-align:center;font-size:11px;color:#60a5fa;text-decoration:none;
+                            padding:5px;border:1px solid #1e40af;border-radius:4px;margin-top:4px">
+                    Ver detalhe completo →
+                  </a>
+                </div>`)
+            } catch {
+              // Keep simple popup on error
+              popupRef.current?.setHTML(`
+                <div style="font-family:system-ui,sans-serif;min-width:200px;padding:2px">
+                  <div style="font-size:13px;font-weight:700;color:#f1f5f9">${props.municipio}</div>
+                  <div style="font-size:11px;color:#94a3b8;margin-bottom:8px">${props.distribuidora} — ${props.uf}</div>
+                  <div style="font-size:20px;font-weight:900;color:${scoreColor}">
+                    ${score?.toFixed(1) ?? '—'}<span style="font-size:12px;color:#64748b">/100</span>
+                  </div>
+                  <div style="font-size:11px;color:#64748b;margin-top:4px">DEC ${props.dec_medio_12m?.toFixed(1) ?? '—'}h · ${props.meses_violacao ?? '—'}/12 violações</div>
+                </div>`)
+            }
           })
 
           map.current.on('mouseenter', 'municipios-fill', () => {
@@ -242,7 +372,6 @@ export default function MapaRisco() {
   }, [mapLoaded, redeMtActive])
 
   // ── Transformadores toggle ─────────────────────────────────────────────────
-  // Requires a selected municipality. Shows a hint if none is selected.
   const toggleTransformadores = useCallback(async () => {
     if (!map.current || !mapLoaded) return
 
@@ -265,7 +394,6 @@ export default function MapaRisco() {
       const geojson: GeoJSON.FeatureCollection = await res.json()
 
       if (map.current.getSource('transformadores-layer')) {
-        // Refresh data for new municipality
         const src = map.current.getSource('transformadores-layer') as mapboxgl.GeoJSONSource
         src.setData(geojson)
       } else {
@@ -292,6 +420,43 @@ export default function MapaRisco() {
       console.error('[MapaRisco] transformadores load failed:', err)
     }
   }, [mapLoaded, transActive, selectedMunicipio])
+
+  // ── Gaps de proteção toggle ────────────────────────────────────────────────
+  const toggleGaps = useCallback(async () => {
+    if (!map.current || !mapLoaded) return
+
+    if (gapsActive) {
+      removeLayer(map.current, 'gaps-layer')
+      setGapsActive(false)
+      return
+    }
+
+    try {
+      const res = await fetch(`${API_URL}/api/gaps-protecao?score_min=20&limit=500`)
+      const geojson: GeoJSON.FeatureCollection = await res.json()
+
+      if (map.current.getSource('gaps-layer')) {
+        const src = map.current.getSource('gaps-layer') as mapboxgl.GeoJSONSource
+        src.setData(geojson)
+      } else {
+        map.current.addSource('gaps-layer', { type: 'geojson', data: geojson })
+        map.current.addLayer({
+          id: 'gaps-layer',
+          type: 'line',
+          source: 'gaps-layer',
+          paint: {
+            'line-color': '#ef4444',
+            'line-width': 2,
+            'line-opacity': 0.85,
+            'line-dasharray': [2, 2],
+          },
+        })
+      }
+      setGapsActive(true)
+    } catch (err) {
+      console.error('[MapaRisco] gaps load failed:', err)
+    }
+  }, [mapLoaded, gapsActive])
 
   // Re-load transformadores when selected municipality changes while layer is active
   useEffect(() => {
@@ -363,11 +528,17 @@ export default function MapaRisco() {
         </button>
 
         <button
-          disabled
-          title="Endpoint em desenvolvimento"
-          className="px-3 py-1.5 text-xs font-medium rounded border bg-gray-900/40 border-gray-800 text-gray-600 cursor-not-allowed"
+          onClick={toggleGaps}
+          className={`px-3 py-1.5 text-xs font-medium rounded border transition-colors backdrop-blur-sm ${
+            gapsActive
+              ? 'bg-red-700 border-red-600 text-white'
+              : 'bg-gray-900/80 border-gray-700 text-gray-300 hover:bg-gray-800 hover:text-white'
+          }`}
         >
-          Religadores
+          <span className="inline-flex items-center gap-1">
+            <span className="w-4 border-b-2 border-dashed border-current" />
+            Gaps MT
+          </span>
         </button>
 
         {selectedMunicipio && (
@@ -417,13 +588,13 @@ export default function MapaRisco() {
 
       <style>{`
         .gridrisk-popup .mapboxgl-popup-content {
-          background: #1e293b;
+          background: #0f172a;
           border: 1px solid #334155;
           border-radius: 8px;
           padding: 12px;
-          box-shadow: 0 10px 25px rgba(0,0,0,0.5);
+          box-shadow: 0 10px 25px rgba(0,0,0,0.6);
         }
-        .gridrisk-popup .mapboxgl-popup-tip { border-top-color: #1e293b; }
+        .gridrisk-popup .mapboxgl-popup-tip { border-top-color: #0f172a; }
         .gridrisk-popup .mapboxgl-popup-close-button { color: #94a3b8; font-size: 16px; padding: 4px 8px; }
         .gridrisk-popup .mapboxgl-popup-close-button:hover { color: #f1f5f9; background: transparent; }
       `}</style>

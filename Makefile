@@ -111,3 +111,16 @@ dev-backend:
 
 dev-frontend:
 	cd frontend && npm run dev
+
+gaps:
+	$(PIPELINE) calculate_gaps.py $(if $(UF),--uf $(UF),) $(if $(DISTRIBUIDORA),--distribuidora "$(DISTRIBUIDORA)",)
+
+historico:
+	$(PIPELINE) calculate_historico.py
+
+populacao:
+	@if [ -z "$(UF)" ]; then echo "Erro: informe UF=XX"; exit 1; fi
+	$(PIPELINE) ingest_ibge_populacao.py --uf $(UF)
+
+full-pipeline: ingest-ibge ingest-bdgd ingest-dec score gaps historico populacao
+	@echo "Pipeline completo executado."
