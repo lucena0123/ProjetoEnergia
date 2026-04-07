@@ -87,6 +87,28 @@ LAYER_MAP: dict[str, tuple[str, dict[str, str]]] = {
             "geom": "geometry",
         },
     ),
+    "CTMT": (
+        "alimentadores",
+        {
+            "cod_id": "COD_ID",
+            "subestacao_id": "COD_SSDMT",
+            "n_consumidores": "QTD_UC",
+            "comprimento_km": "COMP_TREC",
+            "tensao_nom": "TEN_NOM",
+            "data_implant": "DAT_INS",
+            "geom": "geometry",
+        },
+    ),
+    "EQCHAVE": (
+        "chaves",
+        {
+            "cod_id": "COD_ID",
+            "tipo_chave": "TIP_EQMT",
+            "operacao": "OPE_CHAVE",
+            "data_implant": "DAT_INS",
+            "geom": "geometry",
+        },
+    ),
 }
 
 TARGET_CRS = "EPSG:4674"

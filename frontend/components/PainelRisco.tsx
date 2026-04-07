@@ -8,6 +8,10 @@ interface MunicipioRisco {
   dec_medio_12m: number
   meses_violacao: number
   idade_media_anos: number
+  populacao?: number
+  tendencia?: string
+  km_sem_protecao?: number
+  n_transformadores_criticos?: number
 }
 
 interface PainelRiscoProps {
@@ -25,12 +29,31 @@ function scoreColor(score: number): string {
   return 'bg-green-900/60 text-green-300 border border-green-700'
 }
 
+function tendenciaIcon(t: string | undefined): string {
+  if (t === 'piorando') return '📈'
+  if (t === 'melhorando') return '📉'
+  return '➡️'
+}
+
+function tendenciaColor(t: string | undefined): string {
+  if (t === 'piorando') return 'text-red-400'
+  if (t === 'melhorando') return 'text-green-400'
+  return 'text-gray-500'
+}
+
+function formatK(n: number | undefined | null): string {
+  if (n == null) return '—'
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`
+  return String(n)
+}
+
 const PAGE_SIZE = 20
 
 function SkeletonRow() {
   return (
     <tr className="border-b border-gray-800 animate-pulse">
-      {Array.from({ length: 8 }).map((_, i) => (
+      {Array.from({ length: 11 }).map((_, i) => (
         <td key={i} className="px-3 py-3">
           <div className="h-3.5 bg-gray-800 rounded w-full" />
         </td>
@@ -60,9 +83,12 @@ export default function PainelRisco({
               <th className="px-3 py-3 text-left w-12">UF</th>
               <th className="px-3 py-3 text-left">Distribuidora</th>
               <th className="px-3 py-3 text-center">Score</th>
+              <th className="px-3 py-3 text-center">Tend.</th>
               <th className="px-3 py-3 text-right">DEC Médio (h)</th>
-              <th className="px-3 py-3 text-right">Meses Violação</th>
-              <th className="px-3 py-3 text-right">Idade Rede (a)</th>
+              <th className="px-3 py-3 text-right">Meses Viol.</th>
+              <th className="px-3 py-3 text-right">Idade (a)</th>
+              <th className="px-3 py-3 text-right">Pop. Afetada</th>
+              <th className="px-3 py-3 text-right">Km s/ Prot.</th>
             </tr>
           </thead>
           <tbody>
@@ -71,7 +97,7 @@ export default function PainelRisco({
             ) : data.length === 0 ? (
               <tr>
                 <td
-                  colSpan={8}
+                  colSpan={11}
                   className="px-6 py-12 text-center text-gray-500 text-sm"
                 >
                   Nenhum município encontrado com os filtros aplicados.
@@ -89,7 +115,12 @@ export default function PainelRisco({
                       {rank}
                     </td>
                     <td className="px-3 py-3 font-medium text-white">
-                      {item.municipio}
+                      <a
+                        href={`/municipio/${encodeURIComponent(item.municipio)}`}
+                        className="hover:text-blue-400 transition-colors"
+                      >
+                        {item.municipio}
+                      </a>
                     </td>
                     <td className="px-3 py-3 text-gray-400 font-mono text-xs">
                       {item.uf}
@@ -104,6 +135,14 @@ export default function PainelRisco({
                         {item.score_risco?.toFixed(1)}
                       </span>
                     </td>
+                    <td className="px-3 py-3 text-center">
+                      <span
+                        className={`text-xs ${tendenciaColor(item.tendencia)}`}
+                        title={item.tendencia}
+                      >
+                        {tendenciaIcon(item.tendencia)}
+                      </span>
+                    </td>
                     <td className="px-3 py-3 text-right text-gray-300 tabular-nums text-xs">
                       {item.dec_medio_12m?.toFixed(2)}
                     </td>
@@ -112,6 +151,16 @@ export default function PainelRisco({
                     </td>
                     <td className="px-3 py-3 text-right text-gray-300 tabular-nums text-xs">
                       {item.idade_media_anos?.toFixed(1)}
+                    </td>
+                    <td className="px-3 py-3 text-right text-gray-400 tabular-nums text-xs">
+                      {formatK(item.populacao)}
+                    </td>
+                    <td className="px-3 py-3 text-right tabular-nums text-xs">
+                      {item.km_sem_protecao != null && item.km_sem_protecao > 0 ? (
+                        <span className="text-orange-400">{item.km_sem_protecao.toFixed(1)}</span>
+                      ) : (
+                        <span className="text-gray-600">—</span>
+                      )}
                     </td>
                   </tr>
                 )
@@ -149,7 +198,6 @@ export default function PainelRisco({
             Anterior
           </button>
 
-          {/* Page number buttons (show up to 5 around current page) */}
           <div className="hidden sm:flex items-center gap-1">
             {Array.from({ length: Math.min(5, totalPages) }, (_, i) => {
               const halfWindow = 2

@@ -144,3 +144,94 @@ CREATE INDEX IF NOT EXISTS idx_ibge_municipios_geom
 
 CREATE INDEX IF NOT EXISTS idx_ibge_municipios_nome
   ON ibge_municipios(nome_norm, uf);
+
+-- -------------------------------------------------------------
+-- alimentadores: MT feeders/circuits (CTMT layer from BDGD)
+-- -------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS alimentadores (
+  id              SERIAL PRIMARY KEY,
+  cod_id          VARCHAR(50) UNIQUE,
+  distribuidora   VARCHAR(100),
+  municipio       VARCHAR(100),
+  uf              CHAR(2),
+  subestacao_id   VARCHAR(50),
+  n_consumidores  INT,
+  comprimento_km  FLOAT,
+  tensao_nom      FLOAT,
+  data_implant    DATE,
+  geom            GEOMETRY(MultiLineString, 4674)
+);
+
+-- -------------------------------------------------------------
+-- chaves: Switches and sectionalizers (EQCHAVE layer from BDGD)
+-- -------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS chaves (
+  id            SERIAL PRIMARY KEY,
+  cod_id        VARCHAR(50) UNIQUE,
+  distribuidora VARCHAR(100),
+  municipio     VARCHAR(100),
+  uf            CHAR(2),
+  tipo_chave    VARCHAR(50),
+  operacao      VARCHAR(20),
+  data_implant  DATE,
+  geom          GEOMETRY(Point, 4674)
+);
+
+-- -------------------------------------------------------------
+-- gaps_protecao: MT segments without recloser coverage
+-- -------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS gaps_protecao (
+  id              SERIAL PRIMARY KEY,
+  distribuidora   VARCHAR(100),
+  municipio       VARCHAR(100),
+  uf              CHAR(2),
+  comprimento_km  FLOAT,
+  score_vulnerabilidade FLOAT,
+  atualizado_em   TIMESTAMP DEFAULT NOW(),
+  geom            GEOMETRY(MultiLineString, 4674)
+);
+
+ALTER TABLE IF EXISTS gaps_protecao
+  ALTER COLUMN geom TYPE GEOMETRY(MultiLineString, 4674)
+  USING CASE
+    WHEN geom IS NULL THEN NULL
+    ELSE ST_Multi(ST_CollectionExtract(geom, 2))
+  END;
+
+-- -------------------------------------------------------------
+-- historico_score: Monthly score snapshots for trend analysis
+-- -------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS historico_score (
+  id            SERIAL PRIMARY KEY,
+  municipio     VARCHAR(100),
+  distribuidora VARCHAR(100),
+  uf            CHAR(2),
+  ano           INT,
+  mes           INT,
+  score_risco   FLOAT,
+  dec_medio     FLOAT,
+  calculado_em  TIMESTAMP DEFAULT NOW(),
+  UNIQUE(municipio, distribuidora, ano, mes)
+);
+
+-- -------------------------------------------------------------
+-- ibge_populacao: Population data from IBGE census
+-- -------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS ibge_populacao (
+  id            SERIAL PRIMARY KEY,
+  codigo_ibge   VARCHAR(7) UNIQUE,
+  municipio     VARCHAR(120),
+  uf            CHAR(2),
+  populacao     INT,
+  domicilios    INT,
+  pib_per_capita FLOAT,
+  area_km2      FLOAT,
+  atualizado_em TIMESTAMP DEFAULT NOW()
+);
+
+-- Spatial and lookup indexes
+CREATE INDEX IF NOT EXISTS idx_alimentadores_geom ON alimentadores USING GIST(geom);
+CREATE INDEX IF NOT EXISTS idx_chaves_geom        ON chaves        USING GIST(geom);
+CREATE INDEX IF NOT EXISTS idx_gaps_geom          ON gaps_protecao USING GIST(geom);
+CREATE INDEX IF NOT EXISTS idx_historico_municipio ON historico_score(municipio, distribuidora, ano, mes);
+CREATE INDEX IF NOT EXISTS idx_ibge_pop_codigo    ON ibge_populacao(codigo_ibge);

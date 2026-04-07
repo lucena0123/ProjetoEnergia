@@ -21,6 +21,9 @@ interface KpisData {
   municipios_criticos: number
   dec_medio_geral: number
   total_meses_violacao: number
+  consumidores_afetados: number
+  km_rede_sem_protecao: number
+  transformadores_criticos: number
 }
 
 interface MunicipioRisco {
@@ -31,6 +34,10 @@ interface MunicipioRisco {
   dec_medio_12m: number
   meses_violacao: number
   idade_media_anos: number
+  populacao?: number
+  tendencia?: string
+  km_sem_protecao?: number
+  n_transformadores_criticos?: number
 }
 
 interface RankingResponse {
@@ -39,6 +46,13 @@ interface RankingResponse {
   page: number
   limit: number
   pages: number
+}
+
+function formatLargeNumber(n: number | null | undefined): string {
+  if (n == null) return '—'
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
+  if (n >= 1_000) return `${(n / 1_000).toFixed(0)}k`
+  return String(n)
 }
 
 export default function HomePage() {
@@ -119,41 +133,66 @@ export default function HomePage() {
               Erro ao carregar KPIs. Verifique a conexão com a API.
             </div>
           ) : (
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-              <KpiCard
-                title="Score Médio"
-                value={kpisLoading ? '—' : (kpis?.score_medio?.toFixed(1) ?? '—')}
-                subtitle="Índice de risco consolidado"
-                color={
-                  kpis?.score_medio == null
-                    ? 'blue'
-                    : kpis.score_medio >= 80
-                    ? 'red'
-                    : kpis.score_medio >= 60
-                    ? 'orange'
-                    : kpis.score_medio >= 40
-                    ? 'yellow'
-                    : 'green'
-                }
-              />
-              <KpiCard
-                title="Municípios Críticos (>70)"
-                value={kpisLoading ? '—' : (kpis?.municipios_criticos ?? '—')}
-                subtitle="Score de risco acima de 70"
-                color="red"
-              />
-              <KpiCard
-                title="DEC Médio (h)"
-                value={kpisLoading ? '—' : (kpis?.dec_medio_geral?.toFixed(2) ?? '—')}
-                subtitle="Duração equiv. de interrupção"
-                color="orange"
-              />
-              <KpiCard
-                title="Meses c/ Violação"
-                value={kpisLoading ? '—' : (kpis?.total_meses_violacao ?? '—')}
-                subtitle="Meses com DEC acima do limite"
-                color="yellow"
-              />
+            <div className="space-y-4">
+              {/* Row 1: 4 cards */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                <KpiCard
+                  title="Score Médio"
+                  value={kpisLoading ? '—' : (kpis?.score_medio?.toFixed(1) ?? '—')}
+                  subtitle="Índice de risco consolidado"
+                  color={
+                    kpis?.score_medio == null
+                      ? 'blue'
+                      : kpis.score_medio >= 80
+                      ? 'red'
+                      : kpis.score_medio >= 60
+                      ? 'orange'
+                      : kpis.score_medio >= 40
+                      ? 'yellow'
+                      : 'green'
+                  }
+                />
+                <KpiCard
+                  title="Municípios Críticos (>70)"
+                  value={kpisLoading ? '—' : (kpis?.municipios_criticos ?? '—')}
+                  subtitle="Score de risco acima de 70"
+                  color="red"
+                />
+                <KpiCard
+                  title="DEC Médio (h)"
+                  value={kpisLoading ? '—' : (kpis?.dec_medio_geral?.toFixed(2) ?? '—')}
+                  subtitle="Duração equiv. de interrupção"
+                  color="orange"
+                />
+                <KpiCard
+                  title="Meses c/ Violação"
+                  value={kpisLoading ? '—' : (kpis?.total_meses_violacao ?? '—')}
+                  subtitle="Meses com DEC acima do limite"
+                  color="yellow"
+                />
+              </div>
+
+              {/* Row 2: 3 cards */}
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                <KpiCard
+                  title="Consumidores em Risco"
+                  value={kpisLoading ? '—' : formatLargeNumber(kpis?.consumidores_afetados ?? null)}
+                  subtitle="Estimativa em municípios críticos"
+                  color="red"
+                />
+                <KpiCard
+                  title="Km Sem Proteção"
+                  value={kpisLoading ? '—' : (kpis?.km_rede_sem_protecao != null ? `${kpis.km_rede_sem_protecao.toFixed(1)}km` : '—')}
+                  subtitle="Rede MT sem cobertura de religador"
+                  color="orange"
+                />
+                <KpiCard
+                  title="Transformadores Críticos"
+                  value={kpisLoading ? '—' : (kpis?.transformadores_criticos ?? '—')}
+                  subtitle="Com mais de 25 anos de operação"
+                  color="yellow"
+                />
+              </div>
             </div>
           )}
         </section>

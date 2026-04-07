@@ -22,6 +22,9 @@ interface KpisRow {
   municipios_criticos: string
   dec_medio_geral: string | null
   total_meses_violacao: string
+  consumidores_afetados: string | null
+  km_rede_sem_protecao: string | null
+  transformadores_criticos: string
 }
 
 // ---------------------------------------------------------------------------
@@ -180,26 +183,59 @@ export const riscoRoutes: FastifyPluginAsync = async (fastify: FastifyInstance) 
       const offset = (page - 1) * limit
 
       const { distribuidora, uf } = request.query
-      const { where, params, nextIndex } = buildFilters(undefined, distribuidora, uf)
+      const { where, params, nextIndex } = buildFilters('mr', distribuidora, uf)
 
       // Count query
-      const countSql = `SELECT COUNT(*) AS total FROM mapa_risco ${where}`
+      const countSql = `SELECT COUNT(*) AS total FROM mapa_risco mr ${where}`
       const countResult = await pgPool.query<{ total: string }>(countSql, params)
       const total = parseInt(countResult.rows[0]?.total ?? '0', 10)
 
-      // Data query — append pagination params
+      // Data query — append pagination params + enriched columns
       const dataSql = `
         SELECT
-          municipio,
-          distribuidora,
-          uf,
-          score_risco,
-          dec_medio_12m,
-          meses_violacao,
-          idade_media_anos
-        FROM mapa_risco
+          mr.municipio,
+          mr.distribuidora,
+          mr.uf,
+          mr.score_risco,
+          mr.dec_medio_12m,
+          mr.meses_violacao,
+          mr.idade_media_anos,
+          COALESCE(pop.populacao, 0) AS populacao,
+          COALESCE(
+            (SELECT SUM(gp.comprimento_km) FROM gaps_protecao gp
+             WHERE gp.municipio = mr.municipio AND gp.distribuidora = mr.distribuidora), 0
+          ) AS km_sem_protecao,
+          COALESCE(
+            (SELECT COUNT(*) FROM transformadores t
+             WHERE t.municipio = mr.municipio AND t.distribuidora = mr.distribuidora
+               AND EXTRACT(YEAR FROM AGE(NOW(), t.data_implant)) > 25), 0
+          ) AS n_transformadores_criticos,
+          COALESCE(
+            (SELECT
+               CASE
+                 WHEN AVG(hs.score_risco) FILTER (WHERE rn <= 3) >
+                      AVG(hs.score_risco) FILTER (WHERE rn BETWEEN 4 AND 6) + 2
+                 THEN 'piorando'
+                 WHEN AVG(hs.score_risco) FILTER (WHERE rn <= 3) <
+                      AVG(hs.score_risco) FILTER (WHERE rn BETWEEN 4 AND 6) - 2
+                 THEN 'melhorando'
+                 ELSE 'estavel'
+               END
+             FROM (
+               SELECT score_risco,
+                 ROW_NUMBER() OVER (ORDER BY ano DESC, mes DESC) AS rn
+               FROM historico_score hs2
+               WHERE hs2.municipio = mr.municipio AND hs2.distribuidora = mr.distribuidora
+             ) hs
+            ),
+            'estavel'
+          ) AS tendencia
+        FROM mapa_risco mr
+        LEFT JOIN ibge_municipios im
+          ON im.nome_norm = lower(unaccent(mr.municipio)) AND im.uf = mr.uf
+        LEFT JOIN ibge_populacao pop ON pop.codigo_ibge = im.codigo_ibge
         ${where}
-        ORDER BY score_risco DESC NULLS LAST
+        ORDER BY mr.score_risco DESC NULLS LAST
         LIMIT $${nextIndex} OFFSET $${nextIndex + 1}
       `
       const dataResult = await pgPool.query<MapaRiscoRow>(dataSql, [
@@ -226,11 +262,25 @@ export const riscoRoutes: FastifyPluginAsync = async (fastify: FastifyInstance) 
   fastify.get('/kpis', async (_request: FastifyRequest, reply: FastifyReply) => {
     const sql = `
       SELECT
-        ROUND(AVG(score_risco)::numeric, 2)              AS score_medio,
-        COUNT(*) FILTER (WHERE score_risco > 70)         AS municipios_criticos,
-        ROUND(AVG(dec_medio_12m)::numeric, 4)            AS dec_medio_geral,
-        COALESCE(SUM(meses_violacao), 0)                 AS total_meses_violacao
-      FROM mapa_risco
+        ROUND(AVG(mr.score_risco)::numeric, 2)              AS score_medio,
+        COUNT(*) FILTER (WHERE mr.score_risco > 70)         AS municipios_criticos,
+        ROUND(AVG(mr.dec_medio_12m)::numeric, 4)            AS dec_medio_geral,
+        COALESCE(SUM(mr.meses_violacao), 0)                 AS total_meses_violacao,
+        ROUND(COALESCE((
+          SELECT SUM(pop.populacao * 0.37)
+          FROM mapa_risco cr
+          JOIN ibge_municipios im
+            ON im.nome_norm = lower(unaccent(cr.municipio)) AND im.uf = cr.uf
+          JOIN ibge_populacao pop ON pop.codigo_ibge = im.codigo_ibge
+          WHERE cr.score_risco > 70
+        ), 0)::numeric, 0) AS consumidores_afetados,
+        ROUND(COALESCE((SELECT SUM(comprimento_km) FROM gaps_protecao), 0)::numeric, 1)
+          AS km_rede_sem_protecao,
+        COALESCE((
+          SELECT COUNT(*) FROM transformadores
+          WHERE EXTRACT(YEAR FROM AGE(NOW(), data_implant)) > 25
+        ), 0)::text AS transformadores_criticos
+      FROM mapa_risco mr
     `
     const result = await pgPool.query<KpisRow>(sql)
     const row = result.rows[0]
@@ -240,6 +290,11 @@ export const riscoRoutes: FastifyPluginAsync = async (fastify: FastifyInstance) 
       municipios_criticos: row ? parseInt(row.municipios_criticos, 10) : 0,
       dec_medio_geral: row?.dec_medio_geral != null ? parseFloat(row.dec_medio_geral) : null,
       total_meses_violacao: row ? parseInt(row.total_meses_violacao, 10) : 0,
+      consumidores_afetados: row?.consumidores_afetados != null
+        ? parseInt(row.consumidores_afetados, 10) : 0,
+      km_rede_sem_protecao: row?.km_rede_sem_protecao != null
+        ? parseFloat(row.km_rede_sem_protecao) : 0,
+      transformadores_criticos: row ? parseInt(row.transformadores_criticos, 10) : 0,
     })
   })
 }
