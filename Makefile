@@ -1,4 +1,4 @@
-.PHONY: help setup up down logs ingest-ibge ingest-bdgd ingest-dec score pipeline-shell dev-backend dev-frontend
+.PHONY: help setup up down logs seed-demo ingest-ibge ingest-bdgd ingest-dec score pipeline-shell dev-backend dev-frontend
 
 # ── Variáveis ─────────────────────────────────────────────────────────────────
 COMPOSE     = docker compose
@@ -25,6 +25,9 @@ help:
 	@echo "  make score            Recalcula scores de risco para todos os municípios"
 	@echo "  make score DISTRIBUIDORA='Equatorial AL'"
 	@echo "                        Recalcula scores de uma distribuidora específica"
+	@echo ""
+	@echo "  make seed-demo            Popula banco com dados de demo (AL) — ~3 min"
+	@echo "  make seed-demo UF=PE      Gera demo para outro estado"
 	@echo ""
 	@echo "  make ingest-ibge UF=AL"
 	@echo "                        Importa polígonos municipais do IBGE para um estado"
@@ -67,6 +70,9 @@ else
 endif
 
 # ── Pipeline de dados ─────────────────────────────────────────────────────────
+seed-demo:
+	$(PIPELINE) seed_demo.py --uf $(if $(UF),$(UF),AL) --limpar
+
 ingest-ibge:
 	@if [ -z "$(UF)" ]; then \
 		echo "Erro: informe UF=XX (ex: AL) ou UF=ALL para todos os estados"; exit 1; fi
