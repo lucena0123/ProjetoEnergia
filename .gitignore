@@ -34,3 +34,14 @@ Thumbs.db
 # Logs
 *.log
 logs/
+
+# Local agent/browser artifacts
+.claude/
+.playwright-cli/
+test-results/
+
+# Local capture/debug outputs
+capture_*.py
+data_*.json
+data_*.txt
+screenshot_*.png

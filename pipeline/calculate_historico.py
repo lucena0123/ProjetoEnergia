@@ -9,7 +9,9 @@ Supports two modes:
 
 2. Rebuild mode
    Rebuilds historico_score from indicadores_continuidade using the same
-   rolling 12-month logic used by the municipality detail API.
+   rolling 12-month logic used by the municipality detail API. When network
+   age is unavailable in the public BDGD, the score is normalized over the
+   components that are actually available.
 
 Examples:
     python calculate_historico.py
@@ -146,7 +148,7 @@ def rebuild_historico(
       r.uf,
       r.ano,
       r.mes,
-      ROUND((
+      ROUND((((
         LEAST(
           CASE
             WHEN COALESCE(r.dec_limite_12m, 0) > 0
@@ -156,8 +158,17 @@ def rebuild_historico(
           1.0
         ) * 40
         + LEAST(COALESCE(r.meses_violacao_12m, 0)::float / 12.0, 1.0) * 30
-        + LEAST(COALESCE(ir.idade_media_anos, 20) / 40.0, 1.0) * 30
-      )::numeric, 2) AS score_risco,
+        + COALESCE(
+            CASE
+              WHEN ir.idade_media_anos IS NOT NULL
+              THEN LEAST(ir.idade_media_anos / 40.0, 1.0) * 30
+              ELSE NULL
+            END,
+            0
+          )
+      ) / (
+        70 + CASE WHEN ir.idade_media_anos IS NOT NULL THEN 30 ELSE 0 END
+      )) * 100)::numeric, 2) AS score_risco,
       ROUND(r.dec_medio_12m::numeric, 2) AS dec_medio,
       NOW()
     FROM rolling r

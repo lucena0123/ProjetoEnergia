@@ -7,10 +7,14 @@ and writes the results to the mapa_risco table.  The operation is idempotent:
 existing rows are deleted before re-inserting so re-runs always produce a
 fresh, consistent result.
 
-The score is composed of three weighted components (total = 100 pts):
+The score is composed of three weighted components:
   * 40 % — DEC ratio  (apurado / limite, capped at 3x)
   * 30 % — Violation frequency  (months out of last 12 where DEC was exceeded)
   * 30 % — Average network age  (rede_mt, capped at 40 years)
+
+When the public base does not provide network age for a municipality, the
+score is normalized over the components that are actually available. No
+synthetic age fallback is applied.
 
 Usage:
     python calculate_risk.py \
@@ -92,11 +96,16 @@ scoring AS (
         ic.dec_medio_12m,
         ic.ratio_dec,
         ic.meses_violacao,
-        COALESCE(ir.idade_media_anos, 20) AS idade_media_anos,
-        -- Score components (0-100 each)
+        ir.idade_media_anos AS idade_media_anos,
+        -- Score components with real-only normalization
         LEAST(ic.ratio_dec / 3.0, 1.0) * 40                          AS score_dec,    -- 40 %
         LEAST(ic.meses_violacao::float / 12.0, 1.0) * 30             AS score_freq,   -- 30 %
-        LEAST(COALESCE(ir.idade_media_anos, 20) / 40.0, 1.0) * 30    AS score_idade   -- 30 %
+        CASE
+            WHEN ir.idade_media_anos IS NOT NULL
+            THEN LEAST(ir.idade_media_anos / 40.0, 1.0) * 30
+            ELSE NULL
+        END AS score_idade,
+        70 + CASE WHEN ir.idade_media_anos IS NOT NULL THEN 30 ELSE 0 END AS peso_disponivel
     FROM ic_12m ic
     LEFT JOIN idade_rede ir
         ON ic.municipio    = ir.municipio
@@ -106,7 +115,8 @@ SELECT
     municipio,
     distribuidora,
     uf,
-    ROUND((score_dec + score_freq + score_idade)::numeric, 2) AS score_risco,
+    ROUND((((score_dec + score_freq + COALESCE(score_idade, 0)) / NULLIF(peso_disponivel, 0)) * 100)::numeric, 2)
+                                                              AS score_risco,
     ROUND(dec_medio_12m::numeric, 2)                          AS dec_medio_12m,
     ROUND(ratio_dec::numeric, 4)                              AS ratio_dec,
     meses_violacao,

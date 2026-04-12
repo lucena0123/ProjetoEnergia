@@ -9,3 +9,4 @@ click==8.1.7
 python-dotenv==1.0.1
 tqdm==4.66.2
 requests==2.31.0
+networkx==3.4.2

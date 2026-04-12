@@ -36,7 +36,7 @@ export default function MapaPage() {
             >
               <path strokeLinecap="round" strokeLinejoin="round" d="M15 19l-7-7 7-7" />
             </svg>
-            Voltar ao Dashboard
+            Voltar ao Painel
           </Link>
           <span className="text-gray-700">|</span>
           <h1 className="text-white font-semibold text-sm">
@@ -44,23 +44,8 @@ export default function MapaPage() {
           </h1>
         </div>
 
-        <div className="hidden sm:flex items-center gap-2 text-xs text-gray-500">
-          <span className="flex items-center gap-1">
-            <span className="w-3 h-3 rounded-full bg-green-500 inline-block" />
-            Baixo
-          </span>
-          <span className="flex items-center gap-1">
-            <span className="w-3 h-3 rounded-full bg-yellow-400 inline-block" />
-            Médio
-          </span>
-          <span className="flex items-center gap-1">
-            <span className="w-3 h-3 rounded-full bg-orange-500 inline-block" />
-            Alto
-          </span>
-          <span className="flex items-center gap-1">
-            <span className="w-3 h-3 rounded-full bg-red-600 inline-block" />
-            Crítico
-          </span>
+        <div className="hidden sm:block text-xs text-gray-500">
+          Legenda e perfil da base no painel do mapa.
         </div>
       </div>
 

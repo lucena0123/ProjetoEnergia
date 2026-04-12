@@ -2,11 +2,13 @@
 
 import { useEffect, useState } from 'react'
 import Link from 'next/link'
+import { useSearchParams } from 'next/navigation'
 import SparkLine from '@/components/SparkLine'
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001'
 
 interface DetalheData {
+  data_mode?: 'public' | 'partner'
   municipio: string
   distribuidora: string
   uf: string
@@ -15,13 +17,18 @@ interface DetalheData {
   dec_limite: number | null
   ratio_dec: number | null
   meses_violacao: number | null
+  meses_violacao_dec: number | null
+  fec_medio_12m: number | null
+  fec_limite: number | null
+  ratio_fec: number | null
+  meses_violacao_fec: number | null
   tendencia: string
   rede: {
     comprimento_mt_km: number
     comprimento_bt_km: number
     n_transformadores: number
     potencia_total_kva: number
-    idade_media_anos: number
+    idade_media_anos: number | null
     transformadores_criticos: number
   }
   protecao: {
@@ -36,17 +43,71 @@ interface DetalheData {
     densidade_hab_km2: number | null
     pib_per_capita: number | null
   }
+  clientes_geracao: {
+    clientes_at: number
+    geracao_at: number
+    geracao_mt: number
+    geracao_bt: number
+  }
+  infraestrutura_at: {
+    km_at: number | null
+    n_subestacoes: number
+    n_transformadores_at: number
+    n_religadores_at: number
+    n_chaves_at: number
+    subestacoes: Array<{
+      cod_id: string
+      tensao_nom: number | null
+      feeders_mt_relacionados: number
+      circuitos_at_relacionados: number
+    }>
+    circuitos_at: Array<{
+      cod_id: string
+      subestacao_id: string | null
+      nome: string | null
+      comprimento_km: number | null
+      tensao_nom: number | null
+    }>
+  }
+  alimentadores: Array<{
+    cod_id: string
+    subestacao_id: string | null
+    km_mt: number | null
+    km_bt: number | null
+    n_transformadores: number | null
+    n_religadores: number | null
+    km_gap_severo: number | null
+    clientes_total: number | null
+  }>
   qualidade_dados: {
-    infraestrutura: 'sintetica' | 'real'
+    infraestrutura_status: 'real' | 'parcial' | 'indisponivel'
     historico_meses_disponiveis: number
     historico_status: 'completo' | 'parcial' | 'insuficiente'
+    lacunas: string[]
+  }
+  metricas_metadata?: {
+    score_risco: MetricMeta
+    continuidade: MetricMeta
+    infraestrutura: MetricMeta
+    protecao: MetricMeta
+    social: MetricMeta
+    partner_operacao: MetricMeta
   }
   historico: Array<{
     ano: number
     mes: number
     score_risco: number
     dec_medio: number | null
+    fec_medio: number | null
   }>
+}
+
+interface MetricMeta {
+  metric_origin: 'observed_public' | 'derived_public' | 'regulatory_context' | 'partner_observed' | 'partner_derived' | 'unavailable'
+  data_reference: string
+  coverage_status: 'complete' | 'partial' | 'insufficient' | 'unavailable'
+  confidence_status: 'high' | 'medium' | 'low' | 'unavailable'
+  lacunas: string[]
 }
 
 interface TransformadorFeature {
@@ -94,6 +155,42 @@ function toNumber(value: unknown): number | null {
   return null
 }
 
+function labelOrigin(origin: MetricMeta['metric_origin']): string {
+  switch (origin) {
+    case 'observed_public':
+      return 'observado público'
+    case 'derived_public':
+      return 'derivado público'
+    case 'regulatory_context':
+      return 'contexto regulatório'
+    case 'partner_observed':
+      return 'observado parceiro'
+    case 'partner_derived':
+      return 'derivado parceiro'
+    default:
+      return 'indisponível'
+  }
+}
+
+function labelStatus(status: MetricMeta['confidence_status'] | MetricMeta['coverage_status']): string {
+  switch (status) {
+    case 'high':
+      return 'alta'
+    case 'medium':
+      return 'média'
+    case 'low':
+      return 'baixa'
+    case 'complete':
+      return 'completa'
+    case 'partial':
+      return 'parcial'
+    case 'insufficient':
+      return 'insuficiente'
+    default:
+      return 'indisponível'
+  }
+}
+
 function normalizeTransformadorFeatures(features: unknown[]): TransformadorFeature[] {
   return features.flatMap((feature) => {
     if (!feature || typeof feature !== 'object') return []
@@ -122,6 +219,9 @@ function normalizeTransformadorFeatures(features: unknown[]): TransformadorFeatu
 
 export default function MunicipioPage({ params }: { params: { nome: string } }) {
   const nome = decodeURIComponent(params.nome)
+  const searchParams = useSearchParams()
+  const uf = searchParams.get('uf') ?? ''
+  const distribuidora = searchParams.get('distribuidora') ?? ''
   const [detalhe, setDetalhe] = useState<DetalheData | null>(null)
   const [transformadores, setTransformadores] = useState<TransformadorFeature[]>([])
   const [loading, setLoading] = useState(true)
@@ -132,10 +232,10 @@ export default function MunicipioPage({ params }: { params: { nome: string } }) 
       setLoading(true)
       setError(null)
       try {
-        const [detRes, transRes] = await Promise.all([
-          fetch(`${API_URL}/api/municipio/${encodeURIComponent(nome)}/detalhe`),
-          fetch(`${API_URL}/api/municipio/${encodeURIComponent(nome)}/transformadores-aging`),
-        ])
+        const qs = new URLSearchParams()
+        if (uf) qs.set('uf', uf)
+        if (distribuidora) qs.set('distribuidora', distribuidora)
+        const detRes = await fetch(`${API_URL}/api/municipio/${encodeURIComponent(nome)}/detalhe?${qs.toString()}`)
 
         if (!detRes.ok) {
           setError(`Município "${nome}" não encontrado.`)
@@ -145,6 +245,11 @@ export default function MunicipioPage({ params }: { params: { nome: string } }) 
         const detData: DetalheData = await detRes.json()
         setDetalhe(detData)
 
+        const transUrl = new URL(`${API_URL}/api/municipio/${encodeURIComponent(nome)}/transformadores-aging`)
+        if (detData.distribuidora) {
+          transUrl.searchParams.set('distribuidora', detData.distribuidora)
+        }
+        const transRes = await fetch(transUrl.toString())
         if (transRes.ok) {
           const transData = await transRes.json()
           setTransformadores(normalizeTransformadorFeatures(transData.features ?? []))
@@ -157,7 +262,7 @@ export default function MunicipioPage({ params }: { params: { nome: string } }) 
       }
     }
     load()
-  }, [nome])
+  }, [distribuidora, nome, uf])
 
   if (loading) {
     return (
@@ -191,10 +296,23 @@ export default function MunicipioPage({ params }: { params: { nome: string } }) 
     detalhe.tendencia === 'piorando' ? 'text-red-400' : detalhe.tendencia === 'melhorando' ? 'text-green-400' : 'text-gray-400'
 
   const sparkData = detalhe.historico.map((h) => h.score_risco)
+  const historicoRegulatorio = detalhe.historico.slice(-6)
   const criticosTrans = transformadores
     .filter((t) => t.properties.status === 'critico')
     .slice(0, 20)
   const historicoSuficiente = detalhe.qualidade_dados.historico_status !== 'insuficiente'
+  const lacunas = detalhe.qualidade_dados.lacunas ?? []
+  const ageUnavailable = lacunas.includes('idade_rede_mt_indisponivel')
+  const metricCards: Array<{ label: string; meta: MetricMeta }> = detalhe.metricas_metadata
+    ? [
+      { label: 'Score de risco', meta: detalhe.metricas_metadata.score_risco },
+      { label: 'Continuidade', meta: detalhe.metricas_metadata.continuidade },
+      { label: 'Infraestrutura', meta: detalhe.metricas_metadata.infraestrutura },
+      { label: 'Proteção', meta: detalhe.metricas_metadata.protecao },
+      { label: 'Social', meta: detalhe.metricas_metadata.social },
+      { label: 'Operação parceira', meta: detalhe.metricas_metadata.partner_operacao },
+    ]
+    : []
 
   return (
     <main className="min-h-screen bg-gray-950 text-white">
@@ -206,7 +324,7 @@ export default function MunicipioPage({ params }: { params: { nome: string } }) 
               <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                 <path strokeLinecap="round" strokeLinejoin="round" d="M15 19l-7-7 7-7" />
               </svg>
-              Dashboard
+              Painel
             </Link>
             <span className="text-gray-700">|</span>
             <h1 className="text-white font-bold text-lg">
@@ -214,7 +332,7 @@ export default function MunicipioPage({ params }: { params: { nome: string } }) 
             </h1>
           </div>
           <Link
-            href="/mapa"
+            href={`/mapa?uf=${encodeURIComponent(detalhe.uf)}&distribuidora=${encodeURIComponent(detalhe.distribuidora)}`}
             className="text-sm text-blue-400 hover:text-blue-300 transition-colors"
           >
             Ver no Mapa →
@@ -223,17 +341,22 @@ export default function MunicipioPage({ params }: { params: { nome: string } }) 
       </header>
 
       <div className="max-w-6xl mx-auto px-6 py-8 space-y-8">
-        {(detalhe.qualidade_dados.infraestrutura === 'sintetica'
-          || detalhe.qualidade_dados.historico_status !== 'completo') && (
+        {(detalhe.qualidade_dados.infraestrutura_status !== 'real'
+          || detalhe.qualidade_dados.historico_status !== 'completo'
+          || ageUnavailable) && (
           <section className="rounded-xl border border-amber-700/60 bg-amber-950/40 px-5 py-4 text-sm text-amber-100">
             <div className="font-semibold tracking-wide text-amber-300">
               Confiabilidade dos dados
             </div>
             <div className="mt-2 space-y-1 text-amber-50/90">
-              {detalhe.qualidade_dados.infraestrutura === 'sintetica' && (
+              {detalhe.qualidade_dados.infraestrutura_status === 'indisponivel' && (
                 <p>
-                  Infraestrutura, proteção e criticidade desta página ainda usam base demonstrativa.
-                  Use estes números apenas para validação do produto.
+                  Infraestrutura elétrica indisponível para este município no recorte público atual.
+                </p>
+              )}
+              {detalhe.qualidade_dados.infraestrutura_status === 'parcial' && (
+                <p>
+                  A infraestrutura é real, mas esta base pública ainda tem lacunas para parte dos campos exibidos.
                 </p>
               )}
               {detalhe.qualidade_dados.historico_status !== 'completo' && (
@@ -242,9 +365,41 @@ export default function MunicipioPage({ params }: { params: { nome: string } }) 
                   A tendência ainda não deve ser tratada como série histórica robusta.
                 </p>
               )}
+              {ageUnavailable && (
+                <p>
+                  A BDGD deste recorte não traz data de implantação segmentada para a rede MT.
+                  A idade da rede não está disponível nesta tela e o score usa apenas componentes reais disponíveis.
+                </p>
+              )}
               <p>
                 População e densidade vêm do IBGE. O score continua sendo uma métrica derivada do projeto.
               </p>
+            </div>
+          </section>
+        )}
+
+        {detalhe.metricas_metadata && (
+          <section className="rounded-xl border border-gray-800 bg-gray-900 p-5">
+            <div className="mb-4">
+              <h3 className="text-sm font-semibold uppercase tracking-wide text-gray-300">
+                Origem e confiança dos dados
+              </h3>
+              <p className="mt-1 text-xs text-gray-500">
+                Este município separa o que é observado na base pública, o que é derivado pelo GridRisk e o que permanece indisponível até uma integração privada.
+              </p>
+            </div>
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+              {metricCards.map(({ label, meta }) => (
+                <div key={label} className="rounded-lg border border-gray-800 bg-gray-950/60 px-4 py-3">
+                  <div className="text-xs uppercase tracking-wide text-gray-500">{label}</div>
+                  <div className="mt-2 space-y-1 text-sm text-gray-300">
+                    <div><span className="text-gray-500">Origem:</span> {labelOrigin(meta.metric_origin)}</div>
+                    <div><span className="text-gray-500">Cobertura:</span> {labelStatus(meta.coverage_status)}</div>
+                    <div><span className="text-gray-500">Confiança:</span> {labelStatus(meta.confidence_status)}</div>
+                  </div>
+                  <div className="mt-2 text-xs leading-5 text-gray-400">{meta.data_reference}</div>
+                </div>
+              ))}
             </div>
           </section>
         )}
@@ -283,6 +438,30 @@ export default function MunicipioPage({ params }: { params: { nome: string } }) 
                     </span>
                   )}
                 </div>
+                {historicoRegulatorio.length > 0 && (
+                  <div className="mt-4 space-y-3">
+                    <div className="rounded-lg border border-gray-800 bg-gray-950/60 px-3 py-2">
+                      <p className="text-[10px] uppercase tracking-wide text-gray-500">DEC histórico</p>
+                      <div className="mt-2 flex flex-wrap gap-2">
+                        {historicoRegulatorio.map((item) => (
+                          <span key={`dec-${item.ano}-${item.mes}`} className="rounded-full border border-gray-800 bg-gray-900 px-2 py-1 text-[11px] text-gray-300">
+                            {item.mes}/{item.ano}: {item.dec_medio?.toFixed(2) ?? '—'}h
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                    <div className="rounded-lg border border-gray-800 bg-gray-950/60 px-3 py-2">
+                      <p className="text-[10px] uppercase tracking-wide text-gray-500">FEC histórico</p>
+                      <div className="mt-2 flex flex-wrap gap-2">
+                        {historicoRegulatorio.map((item) => (
+                          <span key={`fec-${item.ano}-${item.mes}`} className="rounded-full border border-gray-800 bg-gray-900 px-2 py-1 text-[11px] text-gray-300">
+                            {item.mes}/{item.ano}: {item.fec_medio?.toFixed(2) ?? '—'}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                )}
               </div>
             ) : (
               <div className="shrink-0 rounded-lg border border-gray-800 bg-gray-950/60 px-4 py-3 text-xs text-gray-400">
@@ -293,7 +472,7 @@ export default function MunicipioPage({ params }: { params: { nome: string } }) 
         </section>
 
         {/* KPI mini cards */}
-        <section className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+        <section className="grid grid-cols-2 gap-4 sm:grid-cols-3 xl:grid-cols-6">
           <div className="bg-gray-900 border border-gray-800 rounded-lg p-4">
             <p className="text-gray-500 text-xs uppercase tracking-wide">DEC Médio</p>
             <p className="text-2xl font-bold text-orange-400 mt-1">
@@ -302,9 +481,23 @@ export default function MunicipioPage({ params }: { params: { nome: string } }) 
             <p className="text-gray-600 text-xs mt-0.5">Limite: {detalhe.dec_limite ?? 12}h</p>
           </div>
           <div className="bg-gray-900 border border-gray-800 rounded-lg p-4">
+            <p className="text-gray-500 text-xs uppercase tracking-wide">FEC Médio</p>
+            <p className="text-2xl font-bold text-yellow-300 mt-1">
+              {detalhe.fec_medio_12m?.toFixed(2) ?? '—'}
+            </p>
+            <p className="text-gray-600 text-xs mt-0.5">Limite: {detalhe.fec_limite?.toFixed(2) ?? '—'}</p>
+          </div>
+          <div className="bg-gray-900 border border-gray-800 rounded-lg p-4">
             <p className="text-gray-500 text-xs uppercase tracking-wide">Violações DEC</p>
             <p className="text-2xl font-bold text-red-400 mt-1">
-              {detalhe.meses_violacao ?? '—'}<span className="text-sm text-gray-500">/12</span>
+              {detalhe.meses_violacao_dec ?? detalhe.meses_violacao ?? '—'}<span className="text-sm text-gray-500">/12</span>
+            </p>
+            <p className="text-gray-600 text-xs mt-0.5">meses acima do limite</p>
+          </div>
+          <div className="bg-gray-900 border border-gray-800 rounded-lg p-4">
+            <p className="text-gray-500 text-xs uppercase tracking-wide">Violações FEC</p>
+            <p className="text-2xl font-bold text-red-400 mt-1">
+              {detalhe.meses_violacao_fec ?? '—'}<span className="text-sm text-gray-500">/12</span>
             </p>
             <p className="text-gray-600 text-xs mt-0.5">meses acima do limite</p>
           </div>
@@ -360,7 +553,11 @@ export default function MunicipioPage({ params }: { params: { nome: string } }) 
               </div>
               <div className="flex justify-between text-sm">
                 <dt className="text-gray-500">Idade média rede</dt>
-                <dd className="text-white font-medium">{detalhe.rede.idade_media_anos?.toFixed(1)} anos</dd>
+                <dd className="text-white font-medium">
+                  {detalhe.rede.idade_media_anos != null
+                    ? `${detalhe.rede.idade_media_anos.toFixed(1)} anos`
+                    : '—'}
+                </dd>
               </div>
             </dl>
           </div>
@@ -425,6 +622,198 @@ export default function MunicipioPage({ params }: { params: { nome: string } }) 
             </dl>
           </div>
         </div>
+
+        <section className="rounded-xl border border-gray-800 bg-gray-900 p-5">
+          <div className="mb-4">
+            <h3 className="text-sm font-semibold uppercase tracking-wide text-gray-300">Infraestrutura AT</h3>
+            <p className="mt-1 text-xs text-gray-500">Contexto sistêmico de alta tensão e subestações presentes no município.</p>
+          </div>
+
+          <div className="grid grid-cols-2 gap-4 xl:grid-cols-5">
+            <div className="rounded-lg border border-gray-800 bg-gray-950/60 px-4 py-3">
+              <div className="text-xs uppercase tracking-wide text-gray-500">Rede AT</div>
+              <div className="mt-2 text-2xl font-bold text-red-400">{detalhe.infraestrutura_at.km_at?.toFixed(1) ?? '—'} km</div>
+            </div>
+            <div className="rounded-lg border border-gray-800 bg-gray-950/60 px-4 py-3">
+              <div className="text-xs uppercase tracking-wide text-gray-500">Subestações</div>
+              <div className="mt-2 text-2xl font-bold text-blue-300">{detalhe.infraestrutura_at.n_subestacoes}</div>
+            </div>
+            <div className="rounded-lg border border-gray-800 bg-gray-950/60 px-4 py-3">
+              <div className="text-xs uppercase tracking-wide text-gray-500">Transformadores AT</div>
+              <div className="mt-2 text-2xl font-bold text-violet-300">{detalhe.infraestrutura_at.n_transformadores_at}</div>
+            </div>
+            <div className="rounded-lg border border-gray-800 bg-gray-950/60 px-4 py-3">
+              <div className="text-xs uppercase tracking-wide text-gray-500">Religadores AT</div>
+              <div className="mt-2 text-2xl font-bold text-cyan-300">{detalhe.infraestrutura_at.n_religadores_at}</div>
+            </div>
+            <div className="rounded-lg border border-gray-800 bg-gray-950/60 px-4 py-3">
+              <div className="text-xs uppercase tracking-wide text-gray-500">Chaves AT</div>
+              <div className="mt-2 text-2xl font-bold text-amber-300">{detalhe.infraestrutura_at.n_chaves_at}</div>
+            </div>
+          </div>
+
+          <div className="mt-5 grid grid-cols-1 gap-5 xl:grid-cols-[0.9fr,1.1fr]">
+            <div className="overflow-x-auto rounded-lg border border-gray-800 bg-gray-950/40">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-gray-800 text-left text-xs uppercase tracking-wider text-gray-400">
+                    <th className="px-3 py-3">Subestação</th>
+                    <th className="px-3 py-3 text-right">Tensão</th>
+                    <th className="px-3 py-3 text-right">Alimentadores MT</th>
+                    <th className="px-3 py-3 text-right">Circuitos AT</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {detalhe.infraestrutura_at.subestacoes.length === 0 ? (
+                    <tr>
+                      <td colSpan={4} className="px-3 py-4 text-center text-xs text-gray-500">
+                        Sem subestações relacionadas neste município.
+                      </td>
+                    </tr>
+                  ) : (
+                    detalhe.infraestrutura_at.subestacoes.map((item) => (
+                      <tr key={item.cod_id} className="border-b border-gray-800/60">
+                        <td className="px-3 py-3 font-medium text-white">
+                          <Link
+                            href={`/subestacao/${encodeURIComponent(item.cod_id)}?uf=${encodeURIComponent(detalhe.uf)}&distribuidora=${encodeURIComponent(detalhe.distribuidora)}`}
+                            className="transition-colors hover:text-blue-400"
+                          >
+                            {item.cod_id}
+                          </Link>
+                        </td>
+                        <td className="px-3 py-3 text-right tabular-nums text-gray-300">{item.tensao_nom ?? '—'}</td>
+                        <td className="px-3 py-3 text-right tabular-nums text-gray-300">{item.feeders_mt_relacionados}</td>
+                        <td className="px-3 py-3 text-right tabular-nums text-gray-300">{item.circuitos_at_relacionados}</td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+
+            <div className="overflow-x-auto rounded-lg border border-gray-800 bg-gray-950/40">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-gray-800 text-left text-xs uppercase tracking-wider text-gray-400">
+                    <th className="px-3 py-3">Circuito AT</th>
+                    <th className="px-3 py-3">Subestação</th>
+                    <th className="px-3 py-3 text-right">Tensão</th>
+                    <th className="px-3 py-3 text-right">Comprimento</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {detalhe.infraestrutura_at.circuitos_at.length === 0 ? (
+                    <tr>
+                      <td colSpan={4} className="px-3 py-4 text-center text-xs text-gray-500">
+                        Sem circuitos AT relacionados neste município.
+                      </td>
+                    </tr>
+                  ) : (
+                    detalhe.infraestrutura_at.circuitos_at.map((item) => (
+                        <tr key={item.cod_id} className="border-b border-gray-800/60">
+                          <td className="px-3 py-3 font-medium text-white">{item.cod_id}</td>
+                          <td className="px-3 py-3 text-gray-300">
+                            {item.subestacao_id ? (
+                              <Link
+                                href={`/subestacao/${encodeURIComponent(item.subestacao_id)}?uf=${encodeURIComponent(detalhe.uf)}&distribuidora=${encodeURIComponent(detalhe.distribuidora)}`}
+                                className="transition-colors hover:text-blue-400"
+                              >
+                                {item.subestacao_id}
+                              </Link>
+                            ) : '—'}
+                          </td>
+                          <td className="px-3 py-3 text-right tabular-nums text-gray-300">{item.tensao_nom ?? '—'}</td>
+                          <td className="px-3 py-3 text-right tabular-nums text-gray-300">{item.comprimento_km?.toFixed(1) ?? '—'} km</td>
+                        </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+
+        <section className="rounded-xl border border-gray-800 bg-gray-900 p-5">
+          <div className="mb-4">
+            <h3 className="text-sm font-semibold uppercase tracking-wide text-gray-300">Clientes AT e Geração</h3>
+            <p className="mt-1 text-xs text-gray-500">Cadastro público associado ao município. Não representa despacho, fluxo ou operação observada.</p>
+          </div>
+          <div className="grid grid-cols-2 gap-4 xl:grid-cols-4">
+            <div className="rounded-lg border border-gray-800 bg-gray-950/60 px-4 py-3">
+              <div className="text-xs uppercase tracking-wide text-gray-500">Clientes AT</div>
+              <div className="mt-2 text-2xl font-bold text-blue-300">{formatN(detalhe.clientes_geracao.clientes_at)}</div>
+            </div>
+            <div className="rounded-lg border border-gray-800 bg-gray-950/60 px-4 py-3">
+              <div className="text-xs uppercase tracking-wide text-gray-500">Geração AT</div>
+              <div className="mt-2 text-2xl font-bold text-emerald-300">{formatN(detalhe.clientes_geracao.geracao_at)}</div>
+            </div>
+            <div className="rounded-lg border border-gray-800 bg-gray-950/60 px-4 py-3">
+              <div className="text-xs uppercase tracking-wide text-gray-500">Geração MT</div>
+              <div className="mt-2 text-2xl font-bold text-emerald-300">{formatN(detalhe.clientes_geracao.geracao_mt)}</div>
+            </div>
+            <div className="rounded-lg border border-gray-800 bg-gray-950/60 px-4 py-3">
+              <div className="text-xs uppercase tracking-wide text-gray-500">Geração BT</div>
+              <div className="mt-2 text-2xl font-bold text-emerald-300">{formatN(detalhe.clientes_geracao.geracao_bt)}</div>
+            </div>
+          </div>
+        </section>
+
+        {detalhe.alimentadores.length > 0 && (
+          <section className="rounded-xl border border-gray-800 bg-gray-900 p-5">
+            <div className="mb-4 flex items-center justify-between">
+              <h3 className="text-sm font-semibold uppercase tracking-wide text-gray-300">
+                Alimentadores relacionados
+              </h3>
+              <span className="text-xs text-gray-500">
+                Drilldown operacional do município
+              </span>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-gray-800 text-left text-xs uppercase tracking-wider text-gray-400">
+                    <th className="px-3 py-3">Alimentador</th>
+                    <th className="px-3 py-3">Subestação</th>
+                    <th className="px-3 py-3 text-right">MT</th>
+                    <th className="px-3 py-3 text-right">Gap severo</th>
+                    <th className="px-3 py-3 text-right">Transform.</th>
+                    <th className="px-3 py-3 text-right">Relig.</th>
+                    <th className="px-3 py-3 text-right">Clientes</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {detalhe.alimentadores.map((alimentador) => (
+                    <tr key={alimentador.cod_id} className="border-b border-gray-800/60">
+                      <td className="px-3 py-3">
+                        <Link
+                          href={`/alimentador/${encodeURIComponent(alimentador.cod_id)}?uf=${encodeURIComponent(detalhe.uf)}&distribuidora=${encodeURIComponent(detalhe.distribuidora)}`}
+                          className="font-medium text-white transition-colors hover:text-blue-400"
+                        >
+                          {alimentador.cod_id}
+                        </Link>
+                      </td>
+                      <td className="px-3 py-3 text-gray-300">
+                        {alimentador.subestacao_id ? (
+                          <Link
+                            href={`/subestacao/${encodeURIComponent(alimentador.subestacao_id)}?uf=${encodeURIComponent(detalhe.uf)}&distribuidora=${encodeURIComponent(detalhe.distribuidora)}`}
+                            className="transition-colors hover:text-blue-400"
+                          >
+                            {alimentador.subestacao_id}
+                          </Link>
+                        ) : '—'}
+                      </td>
+                      <td className="px-3 py-3 text-right tabular-nums text-gray-300">{alimentador.km_mt?.toFixed(1) ?? '—'} km</td>
+                      <td className="px-3 py-3 text-right tabular-nums text-orange-400">{alimentador.km_gap_severo?.toFixed(1) ?? '—'} km</td>
+                      <td className="px-3 py-3 text-right tabular-nums text-gray-300">{alimentador.n_transformadores ?? '—'}</td>
+                      <td className="px-3 py-3 text-right tabular-nums text-gray-300">{alimentador.n_religadores ?? '—'}</td>
+                      <td className="px-3 py-3 text-right tabular-nums text-gray-300">{formatN(alimentador.clientes_total)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </section>
+        )}
 
         {/* Critical transformers table */}
         {criticosTrans.length > 0 && (

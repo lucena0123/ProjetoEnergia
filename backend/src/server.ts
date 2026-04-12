@@ -5,6 +5,9 @@ import { riscoRoutes } from './routes/risco'
 import { redeRoutes } from './routes/rede'
 import { jobsRoutes } from './routes/jobs'
 import { municipioRoutes } from './routes/municipio'
+import { alimentadorRoutes } from './routes/alimentador'
+import { bdgdRoutes } from './routes/bdgd'
+import { subestacaoRoutes } from './routes/subestacao'
 
 dotenv.config()
 
@@ -21,6 +24,9 @@ async function start() {
   await server.register(redeRoutes, { prefix: '/api' })
   await server.register(jobsRoutes, { prefix: '/api' })
   await server.register(municipioRoutes, { prefix: '/api' })
+  await server.register(alimentadorRoutes, { prefix: '/api' })
+  await server.register(subestacaoRoutes, { prefix: '/api' })
+  await server.register(bdgdRoutes, { prefix: '/api' })
 
   server.get('/health', async () => ({
     status: 'ok',

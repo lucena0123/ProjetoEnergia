@@ -1,14 +1,81 @@
+@import url('https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600;700&family=Fira+Sans:wght@300;400;500;600;700&display=swap');
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
 :root {
-  --background: #0a0a0a;
-  --foreground: #ededed;
+  --background: #030712;
+  --foreground: #f1f5f9;
+  --primary: #1E40AF;
+  --primary-light: #3B82F6;
+  --cta: #F59E0B;
+  --glow-blue: 0 0 12px rgba(59, 130, 246, 0.35);
+  --glow-red: 0 0 12px rgba(239, 68, 68, 0.35);
+  --glow-amber: 0 0 12px rgba(245, 158, 11, 0.35);
+  --glow-green: 0 0 12px rgba(34, 197, 94, 0.35);
+  --glow-purple: 0 0 12px rgba(139, 92, 246, 0.35);
 }
 
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: system-ui, -apple-system, sans-serif;
+  font-family: 'Fira Sans', system-ui, -apple-system, sans-serif;
+  font-size: 16px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Monospace for code, IDs, numbers */
+.font-mono, code, kbd, pre {
+  font-family: 'Fira Code', 'JetBrains Mono', ui-monospace, monospace;
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #111827;
+}
+::-webkit-scrollbar-thumb {
+  background: #374151;
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #4B5563;
+}
+
+/* Focus ring */
+:focus-visible {
+  outline: 2px solid #3B82F6;
+  outline-offset: 2px;
+}
+
+/* Reduced motion */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* Glow utilities */
+@layer utilities {
+  .glow-blue { box-shadow: var(--glow-blue); }
+  .glow-red  { box-shadow: var(--glow-red); }
+  .glow-amber { box-shadow: var(--glow-amber); }
+  .glow-green { box-shadow: var(--glow-green); }
+  .glow-purple { box-shadow: var(--glow-purple); }
+
+  .text-glow-blue { text-shadow: 0 0 10px rgba(59, 130, 246, 0.6); }
+  .text-glow-red  { text-shadow: 0 0 10px rgba(239, 68, 68, 0.6); }
+  .text-glow-amber { text-shadow: 0 0 10px rgba(245, 158, 11, 0.6); }
+  .text-glow-green { text-shadow: 0 0 10px rgba(34, 197, 94, 0.6); }
+  .text-glow-purple { text-shadow: 0 0 10px rgba(139, 92, 246, 0.6); }
+
+  .tabular-nums { font-variant-numeric: tabular-nums; }
 }

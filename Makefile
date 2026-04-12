@@ -1,4 +1,4 @@
-.PHONY: help setup up down logs seed-demo ingest-ibge download-bdgd download-dec download-indqual ingest-bdgd ingest-dec ingest-aneel score pipeline-shell dev-backend dev-frontend gaps historico populacao full-pipeline
+.PHONY: help setup up down logs ingest-ibge download-bdgd download-dec download-indqual ingest-bdgd ingest-dec ingest-aneel replace-infra-real score alimentadores pipeline-shell dev-backend dev-frontend gaps historico populacao full-pipeline
 
 # ── Variáveis ─────────────────────────────────────────────────────────────────
 COMPOSE     = docker compose
@@ -6,6 +6,7 @@ PIPELINE    = $(COMPOSE) exec pipeline python
 DISTRIBUIDORA ?= ""
 UF          ?= ""
 ARQUIVO     ?= ""
+DRY_RUN     ?= 0
 ,           := ,
 
 # ── Help ──────────────────────────────────────────────────────────────────────
@@ -33,6 +34,10 @@ help:
 	@echo "                        Baixa o vínculo oficial IndQual → município"
 	@echo "  make ingest-dec ARQUIVO=/data/indicadores_continuidade.csv ARQUIVO_LIMITE=/data/indicadores_continuidade_limite.csv ARQUIVO_INDQUAL=/data/indqual_municipio.csv UF=CE DISTRIBUIDORA='Enel Ceará' LIMPAR=1"
 	@echo "                        Ingere continuidade oficial ANEEL agregada por município"
+	@echo "  make replace-infra-real ARQUIVO=/data/enel_ce_2024.gdb.zip DISTRIBUIDORA='Enel Ceará' UF=CE"
+	@echo "                        Remove a infraestrutura atual do escopo e substitui pela BDGD real"
+	@echo "  make replace-infra-real DISTRIBUIDORA='Enel Ceará' UF=CE DRY_RUN=1"
+	@echo "                        Mostra quantas linhas seriam removidas sem alterar o banco"
 	@echo "  make ingest-aneel UF=AL"
 	@echo "                        Baixa DEC/FEC reais da ANEEL para um estado (com cache)"
 	@echo "  make ingest-aneel UF=AL,CE"
@@ -42,10 +47,8 @@ help:
 	@echo "  make score            Recalcula scores de risco para todos os municípios"
 	@echo "  make score DISTRIBUIDORA='Equatorial AL'"
 	@echo "                        Recalcula scores de uma distribuidora específica"
-	@echo ""
-	@echo "  make seed-demo            Popula banco com dados de demo (AL) — ~3 min"
-	@echo "                            Tenta baixar DEC/FEC reais da ANEEL; usa sintéticos em caso de falha"
-	@echo "  make seed-demo UF=PE      Gera demo para outro estado"
+	@echo "  make alimentadores UF=CE DISTRIBUIDORA='Enel Ceará'"
+	@echo "                        Recalcula métricas operacionais por alimentador"
 	@echo ""
 	@echo "  make ingest-ibge UF=AL"
 	@echo "                        Importa polígonos municipais do IBGE para um estado"
@@ -88,9 +91,6 @@ else
 endif
 
 # ── Pipeline de dados ─────────────────────────────────────────────────────────
-seed-demo:
-	$(PIPELINE) seed_demo.py --uf $(if $(UF),$(UF),AL) --limpar
-
 ingest-ibge:
 	@if [ -z "$(UF)" ]; then \
 		echo "Erro: informe UF=XX (ex: AL) ou UF=ALL para todos os estados"; exit 1; fi
@@ -143,12 +143,43 @@ ingest-aneel:
 	@if [ -z "$(UF)" ]; then echo "Erro: informe UF=AL ou UF=CE ou UF=ALL"; exit 1; fi
 	$(PIPELINE) ingest_aneel_continuidade.py $(foreach u,$(subst $($,), ,$(UF)),--uf $(u))
 
+replace-infra-real:
+	@if [ -z "$(DISTRIBUIDORA)" ]; then \
+		echo "Erro: informe DISTRIBUIDORA='Nome da Distribuidora'"; exit 1; fi
+	@if [ -z "$(UF)" ]; then \
+		echo "Erro: informe UF=XX"; exit 1; fi
+	@if [ "$(DRY_RUN)" != "1" ] && [ -z "$(ARQUIVO)" ]; then \
+		echo "Erro: informe ARQUIVO=/data/arquivo.gdb.zip quando DRY_RUN!=1"; exit 1; fi
+	$(PIPELINE) replace_infra_real.py \
+		--uf $(UF) \
+		--distribuidora "$(DISTRIBUIDORA)" \
+		--limpar-derivados \
+		$(if $(filter 1,$(DRY_RUN)),--dry-run,)
+ifeq ($(DRY_RUN),1)
+	@echo "Dry-run concluído; nenhuma importação foi executada."
+else
+	$(PIPELINE) ingest_bdgd.py \
+		--arquivo $(ARQUIVO) \
+		--distribuidora "$(DISTRIBUIDORA)" \
+		--uf $(UF)
+	$(PIPELINE) calculate_gaps.py --uf $(UF) --distribuidora "$(DISTRIBUIDORA)"
+	$(PIPELINE) calculate_risk.py --distribuidora "$(DISTRIBUIDORA)"
+	$(PIPELINE) calculate_historico.py --rebuild --uf $(UF) --distribuidora "$(DISTRIBUIDORA)" --limpar
+	$(PIPELINE) calculate_alimentador_metricas.py --uf $(UF) --distribuidora "$(DISTRIBUIDORA)" --limpar
+endif
+
 score:
 ifdef DISTRIBUIDORA
 	$(PIPELINE) calculate_risk.py --distribuidora "$(DISTRIBUIDORA)"
 else
 	$(PIPELINE) calculate_risk.py
 endif
+
+alimentadores:
+	$(PIPELINE) calculate_alimentador_metricas.py \
+		$(if $(UF),--uf $(UF),) \
+		$(if $(DISTRIBUIDORA),--distribuidora "$(DISTRIBUIDORA)",) \
+		--limpar
 
 # ── Desenvolvimento ───────────────────────────────────────────────────────────
 pipeline-shell:
@@ -174,5 +205,5 @@ populacao:
 	@if [ -z "$(UF)" ]; then echo "Erro: informe UF=XX"; exit 1; fi
 	$(PIPELINE) ingest_ibge_populacao.py --uf $(UF)
 
-full-pipeline: ingest-ibge ingest-bdgd ingest-dec score gaps historico populacao
+full-pipeline: ingest-ibge ingest-bdgd ingest-dec score gaps historico alimentadores populacao
 	@echo "Pipeline completo executado."

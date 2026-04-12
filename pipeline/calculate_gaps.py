@@ -1,25 +1,37 @@
 #!/usr/bin/env python3
 """
-calculate_gaps.py — GridRisk pipeline: protection gap analysis
+calculate_gaps.py — GridRisk pipeline: topological public gap analysis
 
-Identifies segments of medium-voltage network (rede_mt) that are NOT covered
-by a recloser (religador) within a given radius. These "gaps" represent zones
-of vulnerability where a fault would require manual restoration.
+Constrói segmentos topológicos de MT por alimentador e recalcula gaps com base
+na distância a equipamentos de proteção/religamento automático e pontos de
+manobra ao longo da rede, sem usar buffer euclidiano.
 
-Usage:
-    python calculate_gaps.py --distribuidora "Equatorial Alagoas" --uf AL
-    python calculate_gaps.py --uf AL --raio_m 500
+Metodologia:
+- segmentos topológicos persistidos em segmentos_mt_topologicos
+- gaps persistidos em gaps_protecao
+- disjuntores reais da BDGD próximos à subestação entram como proteção de cabeceira
+- BAY de alimentador entra como evidência estrutural quando não houver disjuntor explícito
+- chaves normalmente abertas entram como candidatas de transferência, não como proteção
+- score_vulnerabilidade = min((dist_equipamento_auto_km / 10) * 100, 100)
+- dist_religador_km permanece como alias legado de dist_equipamento_auto_km
+- dist_chave_km permanece como alias legado de dist_manobra_km
 """
 
+from __future__ import annotations
+
+import logging
 import os
 import sys
-import logging
 from datetime import datetime
 from typing import Optional
 
 import click
-from sqlalchemy import create_engine, text
 from dotenv import load_dotenv
+from psycopg2.extras import execute_batch
+from sqlalchemy import create_engine, text
+
+from topology_public import FeederScope, build_topology_for_feeder
+
 
 logging.basicConfig(
     level=logging.INFO,
@@ -29,149 +41,408 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 
-def calculate_gaps(distribuidora: Optional[str], uf: Optional[str], raio_m: int, engine) -> int:
-    """Calculate protection gaps and insert into gaps_protecao table."""
+SEGMENT_COLUMNS = [
+    "distribuidora",
+    "municipio",
+    "uf",
+    "alimentador_id",
+    "subestacao_id",
+    "rede_mt_cod_id",
+    "source_segment_key",
+    "node_start_id",
+    "node_end_id",
+    "comprimento_km",
+    "dist_religador_km",
+    "dist_chave_km",
+    "dist_equipamento_auto_km",
+    "dist_manobra_km",
+    "dist_transferencia_km",
+    "score_vulnerabilidade",
+    "score_recomposicao",
+    "gap_religamento_auto",
+    "gap_recomposicao",
+    "gap_transferencia",
+    "equipamentos_auto_considerados",
+    "equipamentos_manobra_considerados",
+    "equipamentos_transferencia_considerados",
+    "clientes_bt_total",
+    "clientes_mt_total",
+    "clientes_total",
+    "demanda_mt_total",
+    "metodologia",
+    "lacunas",
+    "geom_wkb_hex",
+]
 
-    # Build filter conditions
-    conditions = []
-    params: dict = {"raio_m": raio_m}
+SEGMENT_TARGET_COLUMNS = [
+    "distribuidora",
+    "municipio",
+    "uf",
+    "alimentador_id",
+    "subestacao_id",
+    "rede_mt_cod_id",
+    "source_segment_key",
+    "node_start_id",
+    "node_end_id",
+    "comprimento_km",
+    "dist_religador_km",
+    "dist_chave_km",
+    "dist_equipamento_auto_km",
+    "dist_manobra_km",
+    "dist_transferencia_km",
+    "score_vulnerabilidade",
+    "score_recomposicao",
+    "gap_religamento_auto",
+    "gap_recomposicao",
+    "gap_transferencia",
+    "equipamentos_auto_considerados",
+    "equipamentos_manobra_considerados",
+    "equipamentos_transferencia_considerados",
+    "clientes_bt_total",
+    "clientes_mt_total",
+    "clientes_total",
+    "demanda_mt_total",
+    "metodologia",
+    "lacunas",
+    "geom",
+]
+
+GAP_COLUMNS = [
+    "distribuidora",
+    "municipio",
+    "uf",
+    "alimentador_id",
+    "comprimento_km",
+    "score_vulnerabilidade",
+    "dist_religador_km",
+    "dist_chave_km",
+    "dist_equipamento_auto_km",
+    "dist_manobra_km",
+    "dist_transferencia_km",
+    "score_recomposicao",
+    "gap_religamento_auto",
+    "gap_recomposicao",
+    "gap_transferencia",
+    "equipamentos_auto_considerados",
+    "equipamentos_manobra_considerados",
+    "equipamentos_transferencia_considerados",
+    "clientes_bt_total",
+    "clientes_mt_total",
+    "clientes_total",
+    "demanda_mt_total",
+    "metodologia",
+    "geom_wkb_hex",
+]
+
+GAP_TARGET_COLUMNS = [
+    "distribuidora",
+    "municipio",
+    "uf",
+    "alimentador_id",
+    "comprimento_km",
+    "score_vulnerabilidade",
+    "dist_religador_km",
+    "dist_chave_km",
+    "dist_equipamento_auto_km",
+    "dist_manobra_km",
+    "dist_transferencia_km",
+    "score_recomposicao",
+    "gap_religamento_auto",
+    "gap_recomposicao",
+    "gap_transferencia",
+    "equipamentos_auto_considerados",
+    "equipamentos_manobra_considerados",
+    "equipamentos_transferencia_considerados",
+    "clientes_bt_total",
+    "clientes_mt_total",
+    "clientes_total",
+    "demanda_mt_total",
+    "metodologia",
+    "geom",
+]
+
+TEMP_SEGMENTS_TABLE = "tmp_segmentos_mt_topologicos"
+TEMP_GAPS_TABLE = "tmp_gaps_protecao"
+
+
+def _build_filters(distribuidora: Optional[str], uf: Optional[str]) -> tuple[str, dict[str, str]]:
+    conditions: list[str] = []
+    params: dict[str, str] = {}
 
     if distribuidora:
-        conditions.append("r.distribuidora = :distribuidora")
-        params["distribuidora"] = distribuidora
+        conditions.append("distribuidora = :dist")
+        params["dist"] = distribuidora
     if uf:
-        conditions.append("r.uf = :uf")
+        conditions.append("uf = :uf")
         params["uf"] = uf.upper()
 
-    where_clause = "WHERE " + " AND ".join(conditions) if conditions else ""
+    where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+    return where_clause, params
 
-    # Delete existing gaps for this scope
-    delete_conditions = []
-    if distribuidora:
-        delete_conditions.append("distribuidora = :distribuidora")
-    if uf:
-        delete_conditions.append("uf = :uf")
-    delete_where = "WHERE " + " AND ".join(delete_conditions) if delete_conditions else ""
 
-    log.info("Clearing existing gaps (dist=%s, uf=%s)...", distribuidora or "*", uf or "*")
+def _delete_scope(conn, *, distribuidora: Optional[str], uf: Optional[str]) -> None:
+    where_clause, params = _build_filters(distribuidora, uf)
+    conn.execute(text(f"DELETE FROM gaps_protecao {where_clause}"), params)
+    conn.execute(text(f"DELETE FROM segmentos_mt_topologicos {where_clause}"), params)
 
-    # The gaps SQL uses PostGIS geography operations for accurate distance calculations
-    # We use a CTE to compute the buffer union per rede_mt segment, then subtract
-    normalized_gap_geom = (
-        "ST_Multi(ST_CollectionExtract(gap_geom, 2))::geometry(MultiLineString, 4674)"
+
+def _create_staging_tables(conn) -> None:
+    conn.execute(text(f"DROP TABLE IF EXISTS {TEMP_SEGMENTS_TABLE}"))
+    conn.execute(text(f"DROP TABLE IF EXISTS {TEMP_GAPS_TABLE}"))
+    conn.execute(
+        text(
+            f"""
+            CREATE TEMP TABLE {TEMP_SEGMENTS_TABLE}
+            ON COMMIT DROP
+            AS
+            SELECT
+              distribuidora,
+              municipio,
+              uf,
+              alimentador_id,
+              subestacao_id,
+              rede_mt_cod_id,
+              source_segment_key,
+              node_start_id,
+              node_end_id,
+              comprimento_km,
+              dist_religador_km,
+              dist_chave_km,
+              dist_equipamento_auto_km,
+              dist_manobra_km,
+              dist_transferencia_km,
+              score_vulnerabilidade,
+              score_recomposicao,
+              gap_religamento_auto,
+              gap_recomposicao,
+              gap_transferencia,
+              equipamentos_auto_considerados,
+              equipamentos_manobra_considerados,
+              equipamentos_transferencia_considerados,
+              clientes_bt_total,
+              clientes_mt_total,
+              clientes_total,
+              demanda_mt_total,
+              metodologia,
+              lacunas,
+              geom
+            FROM segmentos_mt_topologicos
+            WHERE false
+            """
+        )
+    )
+    conn.execute(
+        text(
+            f"""
+            CREATE TEMP TABLE {TEMP_GAPS_TABLE}
+            ON COMMIT DROP
+            AS
+            SELECT
+              distribuidora,
+              municipio,
+              uf,
+              alimentador_id,
+              comprimento_km,
+              score_vulnerabilidade,
+              dist_religador_km,
+              dist_chave_km,
+              dist_equipamento_auto_km,
+              dist_manobra_km,
+              dist_transferencia_km,
+              score_recomposicao,
+              gap_religamento_auto,
+              gap_recomposicao,
+              gap_transferencia,
+              equipamentos_auto_considerados,
+              equipamentos_manobra_considerados,
+              equipamentos_transferencia_considerados,
+              clientes_bt_total,
+              clientes_mt_total,
+              clientes_total,
+              demanda_mt_total,
+              metodologia,
+              geom
+            FROM gaps_protecao
+            WHERE false
+            """
+        )
     )
 
-    gaps_sql = f"""
-    DELETE FROM gaps_protecao {delete_where};
 
-    INSERT INTO gaps_protecao (distribuidora, municipio, uf, comprimento_km, score_vulnerabilidade, geom)
-    WITH religadores_buf AS (
-      SELECT
-        r_mt.id AS rede_id,
-        ST_Union(ST_Buffer(rel.geom::geography, :raio_m)::geometry) AS buf
-      FROM rede_mt r_mt
-      LEFT JOIN religadores rel
-        ON r_mt.distribuidora = rel.distribuidora
-        AND ST_DWithin(r_mt.geom::geography, rel.geom::geography, :raio_m)
-      GROUP BY r_mt.id
-    ),
-    gaps_raw AS (
-      SELECT
-        r.id,
-        r.distribuidora,
-        r.municipio,
-        r.uf,
-        CASE
-          WHEN rb.buf IS NOT NULL
-          THEN ST_Difference(r.geom, rb.buf)
-          ELSE r.geom
-        END AS gap_geom
-      FROM rede_mt r
-      LEFT JOIN religadores_buf rb ON r.id = rb.rede_id
-      {where_clause.replace("r.", "r.")}
-    ),
-    gaps_filtered AS (
-      SELECT
-        id,
-        distribuidora,
-        municipio,
-        uf,
-        {normalized_gap_geom} AS gap_geom,
-        ST_Length(ST_Transform({normalized_gap_geom}, 31983)) AS len_m
-      FROM gaps_raw
-      WHERE gap_geom IS NOT NULL
-        AND NOT ST_IsEmpty(ST_CollectionExtract(gap_geom, 2))
-        AND ST_Length(ST_Transform({normalized_gap_geom}, 31983)) > 100
-    )
-    SELECT
-      distribuidora,
-      municipio,
-      uf,
-      ROUND((len_m / 1000.0)::numeric, 3) AS comprimento_km,
-      LEAST(ROUND((len_m / 1000.0 / 10.0 * 100)::numeric, 1), 100.0) AS score_vulnerabilidade,
-      gap_geom AS geom
-    FROM gaps_filtered
-    ORDER BY len_m DESC
+def _load_feeders(engine, *, distribuidora: Optional[str], uf: Optional[str]) -> list[FeederScope]:
+    where_clause, params = _build_filters(distribuidora, uf)
+    sql = f"""
+      SELECT cod_id, distribuidora, uf, subestacao_id
+      FROM alimentadores
+      {where_clause}
+      ORDER BY uf ASC, distribuidora ASC, cod_id ASC
     """
+    with engine.connect() as conn:
+        rows = conn.execute(text(sql), params).mappings().all()
+    return [
+        FeederScope(
+            cod_id=str(row["cod_id"]),
+            distribuidora=str(row["distribuidora"]),
+            uf=str(row["uf"]),
+            subestacao_id=str(row["subestacao_id"]) if row["subestacao_id"] else None,
+        )
+        for row in rows
+        if row["cod_id"] and row["distribuidora"] and row["uf"]
+    ]
 
-    try:
+
+def _insert_segments(conn, records: list[dict], *, table_name: str) -> None:
+    if not records:
+        return
+
+    values = [
+        tuple(record.get(column) for column in SEGMENT_COLUMNS)
+        for record in records
+    ]
+    placeholders = ", ".join(
+        ["%s"] * (len(SEGMENT_COLUMNS) - 1)
+        + ["ST_Multi(ST_CollectionExtract(ST_SetSRID(ST_GeomFromWKB(decode(%s, 'hex')), 4674), 2))"]
+    )
+    sql = """
+      INSERT INTO {table_name} (
+        {columns}
+      )
+      VALUES ({placeholders})
+    """
+    sql = sql.format(
+        table_name=table_name,
+        columns=", ".join(SEGMENT_TARGET_COLUMNS),
+        placeholders=placeholders,
+    )
+    with conn.connection.cursor() as cursor:
+        execute_batch(cursor, sql, values, page_size=1000)
+
+
+def _insert_gaps(conn, records: list[dict], *, table_name: str) -> None:
+    if not records:
+        return
+
+    values = [
+        tuple(record.get(column) for column in GAP_COLUMNS)
+        for record in records
+    ]
+    placeholders = ", ".join(
+        ["%s"] * (len(GAP_COLUMNS) - 1)
+        + ["ST_Multi(ST_CollectionExtract(ST_SetSRID(ST_GeomFromWKB(decode(%s, 'hex')), 4674), 2))"]
+    )
+    sql = """
+      INSERT INTO {table_name} (
+        {columns}
+      )
+      VALUES ({placeholders})
+    """
+    sql = sql.format(
+        table_name=table_name,
+        columns=", ".join(GAP_TARGET_COLUMNS),
+        placeholders=placeholders,
+    )
+    with conn.connection.cursor() as cursor:
+        execute_batch(cursor, sql, values, page_size=1000)
+
+
+def _publish_staged(conn, *, distribuidora: Optional[str], uf: Optional[str]) -> None:
+    _delete_scope(conn, distribuidora=distribuidora, uf=uf)
+    conn.execute(
+        text(
+            f"""
+            INSERT INTO segmentos_mt_topologicos (
+              {", ".join(SEGMENT_TARGET_COLUMNS)}
+            )
+            SELECT
+              {", ".join(SEGMENT_TARGET_COLUMNS)}
+            FROM {TEMP_SEGMENTS_TABLE}
+            """
+        )
+    )
+    conn.execute(
+        text(
+            f"""
+            INSERT INTO gaps_protecao (
+              {", ".join(GAP_TARGET_COLUMNS)}
+            )
+            SELECT
+              {", ".join(GAP_TARGET_COLUMNS)}
+            FROM {TEMP_GAPS_TABLE}
+            """
+        )
+    )
+
+
+def calculate_gaps(distribuidora: Optional[str], uf: Optional[str], engine) -> int:
+    feeders = _load_feeders(engine, distribuidora=distribuidora, uf=uf)
+    if not feeders:
+        log.warning("Nenhum alimentador encontrado para o escopo informado.")
         with engine.begin() as conn:
-            for stmt in gaps_sql.strip().split(";"):
-                stmt = stmt.strip()
-                if stmt:
-                    conn.execute(text(stmt), params)
+            _delete_scope(conn, distribuidora=distribuidora, uf=uf)
+        return 0
 
-        # Query results
-        with engine.connect() as conn:
-            count_row = conn.execute(text(
-                f"SELECT COUNT(*), COALESCE(SUM(comprimento_km), 0) FROM gaps_protecao {delete_where}"
-            ), params).fetchone()
-            total_gaps = count_row[0] if count_row else 0
-            total_km = float(count_row[1]) if count_row else 0.0
+    log.info("Recalculando gaps topológicos para %d alimentador(es)...", len(feeders))
 
-            # Worst municipality
-            worst = conn.execute(text(
-                f"""SELECT municipio, SUM(comprimento_km) AS km_total
-                    FROM gaps_protecao {delete_where}
-                    GROUP BY municipio ORDER BY km_total DESC LIMIT 1"""
-            ), params).fetchone()
+    total_segments = 0
+    total_gaps = 0
+    total_gap_km = 0.0
 
-        log.info("Gaps calculated: %d segments, %.1f km total exposed.", total_gaps, total_km)
-        if worst:
-            log.info("Worst municipality: %s (%.1f km exposed)", worst[0], float(worst[1]))
+    with engine.begin() as conn:
+        _create_staging_tables(conn)
 
-        return total_gaps
+        for feeder in feeders:
+            result = build_topology_for_feeder(conn, feeder)
+            _insert_segments(conn, result.segment_records, table_name=TEMP_SEGMENTS_TABLE)
+            _insert_gaps(conn, result.gap_records, table_name=TEMP_GAPS_TABLE)
 
-    except Exception as exc:
-        log.error("Error calculating gaps: %s", exc, exc_info=True)
-        raise
+            total_segments += result.summary["total_segments"]
+            total_gaps += result.summary["total_gaps"]
+            total_gap_km += result.summary["gap_km"]
+            log.info(
+                "[%s/%s/%s] segmentos=%d gaps=%d gap_km=%.1f exposição=%s cobertura_trafo=%.2f cobertura_ucmt=%.2f",
+                feeder.uf,
+                feeder.distribuidora,
+                feeder.cod_id,
+                result.summary["total_segments"],
+                result.summary["total_gaps"],
+                result.summary["gap_km"],
+                "ok" if result.summary["exposure_available"] else "indisponível",
+                result.summary["transformador_coverage"],
+                result.summary["ucmt_coverage"],
+            )
+
+        _publish_staged(conn, distribuidora=distribuidora, uf=uf)
+
+    log.info(
+        "Gaps topológicos calculados: %d segmentos topológicos, %d gaps, %.1f km expostos.",
+        total_segments,
+        total_gaps,
+        total_gap_km,
+    )
+    return total_gaps
 
 
 @click.command()
-@click.option("--distribuidora", default=None, help="Filter by distributor name.")
-@click.option("--uf", default=None, help="Filter by state (2-letter code).")
-@click.option("--raio_m", default=500, show_default=True, type=int,
-              help="Recloser coverage radius in meters.")
-@click.option("--db-url", "db_url", default=None, envvar="DATABASE_URL",
-              help="SQLAlchemy database URL.")
-def main(distribuidora: Optional[str], uf: Optional[str], raio_m: int, db_url: Optional[str]) -> None:
-    """Calculate protection gaps in MT network and store in gaps_protecao table."""
+@click.option("--distribuidora", default=None, help="Filtro por distribuidora.")
+@click.option("--uf", default=None, help="Filtro por estado (2 letras).")
+@click.option("--db-url", "db_url", default=None, envvar="DATABASE_URL", help="SQLAlchemy database URL.")
+def main(distribuidora: Optional[str], uf: Optional[str], db_url: Optional[str]) -> None:
     load_dotenv()
     if db_url is None:
         db_url = os.getenv("DATABASE_URL")
     if not db_url:
-        log.error("DATABASE_URL is not set.")
+        log.error("DATABASE_URL não definida.")
         sys.exit(1)
 
-    engine = create_engine(db_url, pool_pre_ping=True)
+    engine = create_engine(db_url, pool_pre_ping=True, future=True)
     started = datetime.now()
 
     if not distribuidora and not uf:
-        log.warning("No filters specified — processing ALL data. This may take a while.")
+        log.warning("Nenhum filtro informado — todos os alimentadores com dados reais serão processados.")
 
-    count = calculate_gaps(distribuidora, uf, raio_m, engine)
+    count = calculate_gaps(distribuidora, uf, engine)
     elapsed = (datetime.now() - started).total_seconds()
-    log.info("Done. %d gap segments found in %.1fs.", count, elapsed)
+    log.info("Done. %d gaps topológicos encontrados em %.1fs.", count, elapsed)
 
 
 if __name__ == "__main__":
